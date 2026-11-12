@@ -1,0 +1,221 @@
+# JoinMachines
+
+> Two streams, one key, and a window of time in which they are allowed to meet. 🤝
+
+An interval-join ledger for Ruby. You tell it about every record on two inputs: an id, a key, an event time. It tells you which left and right records share a key and landed close enough in time, hands you those pairs in batches as small as you like, and tells you which records can never match anything again so you can throw their payloads away. It never sees a payload. It keeps the bookkeeping, you keep the data.
+
+This is an initial, unstable API. It is a policy core, not a stream processor.
+
+## Quick Start
+
+```bash
+gem 'join_machines'
+```
+
+```ruby
+# A click joins an impression of the same ad shown up to 30 s before it.
+join = JoinMachines::Join.new(before: 30_000, after: 0)
+
+def on_record(join, side, record, store)
+  case join.insert(side, record.id, record.ad_id, record.event_ms)
+  when :late      then return count_late(record)
+  when :duplicate then return
+  when :full      then raise 'join is full: advance the watermarks and retire'
+  end
+  store[side][record.id] = record
+
+  until (pairs = join.drain(100)).empty?
+    pairs.each { |pair| emit(store[:left][pair.left], store[:right][pair.right]) }
+  end
+end
+
+def on_watermark(join, side, event_ms, store)
+  join.advance_watermark(side, event_ms)
+  until (gone = join.retire(100)).empty?
+    gone.each { |r| store[r.side].delete(r.id) }
+  end
+end
+```
+
+Ids, keys, and times are Integers. Time is event time in whatever unit you pick, as long as both inputs agree.
+
+## A Message to the Resistance
+
+So you have impressions on one topic and clicks on another, and somebody in a meeting said "just join them." Thirty seconds of attribution window. How hard can it be.
+
+You put the impressions in a hash by ad id. A click arrives, you look it up, you emit. Then you notice the hash only grows, so you add a sweeper that deletes anything older than thirty seconds by the wall clock. Then a consumer lags for a minute, the sweeper deletes impressions whose clicks are still sitting in the partition, and attribution quietly drops by four percent. Nothing raises. The dashboard just gets a little sadder.
+
+So you stop sweeping by wall clock and sweep by event time. Whose event time? The click that arrives after the sweep was allowed to be up to thirty seconds *behind* the impression's stream, not its own. Then one hot key matches nine thousand buffered records at once and the handler that was supposed to emit "a pair" blocks the consumer while it emits nine thousand.
+
+The piece you keep rebuilding is small: which records are held, which pairs are owed, and when is a record provably finished. With a hard bound on all three. That piece is this gem.
+
+## Chapter 1: Stardate 2026.316, the AMS Widom
+
+> **AMS Widom**, NCC-4232, *Widom*-class stream tender.
+> Two convoys pass in the dark. The tender logs who was abeam of whom, and for how long it still matters.
+
+The tender carries no cargo. Freighters from two lanes report in as they pass: hull number, consignment code, time of passage. The tender's log pairs every hull on one lane with every hull on the other that carried the same code within the agreed interval, and strikes a hull from the log only when the other lane's traffic control certifies that nothing that early is still inbound.
+
+On a bridge somewhere, a cadet volunteers:
+
+```ruby
+def on_click(click)
+  impression = @impressions[click.ad_id]
+  emit(impression, click) if impression && click.at - impression.at <= 30
+end
+
+every(30.seconds) { @impressions.delete_if { |_, i| i.at < Time.now - 30 } }
+```
+
+"That," says the tender's logkeeper, "is a join whose correctness depends on nobody ever being late. Have you met a convoy?"
+
+## The Flight Plan
+
+Each record the join holds goes through this:
+
+```mermaid
+stateDiagram-v2
+    [*] --> refused: insert → :late, :duplicate, :full, :pending
+    [*] --> held: insert → :accepted
+    held --> held: pairs with it are drained
+    held --> retirable: opposite watermark passes its reach
+    retirable --> [*]: retire, returns a Retired
+```
+
+And the join as a whole only ever owes pairs for one record at a time:
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant J as Join
+
+    C->>J: insert(:right, 1, key 9, t=8)
+    J-->>C: :accepted (nothing to match)
+    C->>J: insert(:right, 2, key 9, t=15)
+    J-->>C: :accepted
+    C->>J: insert(:left, 100, key 9, t=10)
+    J-->>C: :accepted, 2 pairs owed
+    C->>J: insert(:left, 101, ...)
+    J-->>C: :pending
+    C->>J: drain(1)
+    J-->>C: [Pair(9, 100, 1)]
+    C->>J: drain(1)
+    J-->>C: [Pair(9, 100, 2)]
+    C->>J: advance_watermark(:right, 15)
+    C->>J: retire(10)
+    J-->>C: [Retired(:left, 100, 9, 10)]
+```
+
+## How the Join Works
+
+### Bounds
+
+```ruby
+join = JoinMachines::Join.new(before: 2, after: 5)
+join.before   # => 2
+join.after    # => 5
+```
+
+A left record at time `t` matches right records with the same key at times `t - 2` through `t + 5`, both ends included. `before: 0, after: 0` is an exact-time join. The bounds are fixed for the life of the join.
+
+### Insert
+
+```ruby
+join.insert(:right, 1, 9, 8)     # => :accepted   (side, id, key, timestamp)
+join.insert(:right, 2, 9, 15)    # => :accepted
+join.insert(:right, 3, 9, 16)    # => :accepted
+join.insert(:left, 100, 9, 10)   # => :accepted
+join.pending?                    # => true
+join.pending_pairs               # => 2
+```
+
+An accepted record is held, and the join now owes one pair for every held record on the other side with the same key inside the interval. The ids are yours. They only have to be unique among the records currently held on the same side.
+
+### Drain
+
+```ruby
+join.drain(1)   # => [#<data JoinMachines::Pair key=9, left=100, right=1>]
+join.pending?   # => true
+join.drain(8)   # => [#<data JoinMachines::Pair key=9, left=100, right=2>]
+join.pending?   # => false
+join.drain(8)   # => []
+```
+
+`drain(max)` hands over at most `max` owed pairs. Whatever didn't fit stays owed, in order, and the next call picks up exactly where this one stopped. Every pair comes out once. While pairs are owed, `insert` and `retire` answer `:pending`:
+
+```ruby
+join.insert(:left, 101, 9, 14)   # => :accepted, owes pairs with 2 and 3
+join.insert(:left, 102, 9, 14)   # => :pending
+join.drain(8).size               # => 2
+```
+
+### Watermarks
+
+```ruby
+join.advance_watermark(:right, 14)   # => true
+join.advance_watermark(:right, 13)   # => false, time went backwards
+join.watermark(:right)               # => 14
+join.watermark(:left)                # => nil
+join.insert(:right, 4, 9, 14)        # => :late
+join.insert(:right, 4, 9, 15)        # => :accepted
+join.drain(8)
+```
+
+Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. Advancing a watermark removes nothing by itself.
+
+### Retire
+
+```ruby
+join.retirable                       # => 0
+join.advance_watermark(:right, 15)   # left 100 reached right times 8..15
+join.retirable                       # => 1
+join.retire(10)
+# => [#<data JoinMachines::Retired side=:left, id=100, key=9, timestamp=10>]
+```
+
+A held record is finished when the *other* side's watermark reaches the last time it could match. From then on nothing admissible can pair with it. `retire(max)` removes up to `max` finished records and tells you which, so you can drop their payloads. Anything over `max` stays `retirable` for the next call.
+
+### Capacity
+
+```ruby
+JoinMachines::CAPACITY   # => 64
+join.capacity            # => 64
+join.size(:left)         # => 1
+```
+
+Each side holds 64 records. Past that, `insert` says `:full`. A record is never evicted to make room, because evicting it would silently lose its future pairs. Advance the watermarks, retire, and try again, or shard by key across joins.
+
+## The Rules of the Tender
+
+- **Ids, keys, times, bounds, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. A side that isn't `:left` or `:right` raises `ArgumentError` (or `TypeError` if it isn't a Symbol).
+- **Refusals don't raise.** `:pending`, `:late`, `:duplicate`, `:full`, and `false` are answers, and a refused call changes nothing.
+- **One record's pairs at a time.** Drain what the last insert owes before inserting or retiring.
+- **Late is judged by a record's own side. Retirement is judged by the other side.** That asymmetry is what makes it safe: a record that is not late always finds every partner it should still held.
+- **Time saturates at the edges.** A reach that would run below 0 or past `2**64-1` stops there.
+- **Frozen means frozen.** `freeze` the join and `insert`, `drain`, `advance_watermark`, and `retire` raise `FrozenError`.
+
+## What You Think You're Doing vs Reality
+
+### You Think: "I'll expire old records after the window has passed."
+### Reality: Passed according to whom?
+
+Your wall clock says thirty seconds went by. The click stream, three partitions behind, has not been told. A record is finished when the stream it is waiting on says it has moved on, and the only thing that can say that is that stream's watermark. `retire` uses nothing else.
+
+### You Think: "A record matches, I emit a pair."
+### Reality: A record matches four hundred, and your output buffer holds fifty.
+
+A join's output per input is not bounded by one. `drain(max)` makes the batch size your decision, and keeps the remainder owed instead of dropped or buffered somewhere you can't see.
+
+## What's Yours
+
+The payloads. The join stores three Integers per record and nothing else, so you keep a store keyed by side and id and delete from it when `retire` says so. Hashing a wide key down to an Integer is also yours, and so is checking the real key on a pair if your hash can collide.
+
+The watermarks. The join believes them. Advance one too eagerly and the records it would have matched come back `:late`. Never advance one and both sides fill up and stay `:full`.
+
+Everything else a stream processor does: reading inputs, running the user's function on a pair, checkpointing, restoring after a crash. The join lives in your process and forgets everything when the process does. Pairs you drained before a crash are not remembered as drained by anyone but you.
+
+## License
+
+MIT License. See [LICENSE.txt](LICENSE.txt) for details.
+
+**Remember: the record you swept on a timer was thirty seconds old. Its match was thirty-one seconds late.**

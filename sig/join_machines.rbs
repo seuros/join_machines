@@ -1,0 +1,41 @@
+module JoinMachines
+  VERSION: String
+  CAPACITY: Integer
+
+  type side = :left | :right
+
+  class Pair < Data
+    attr_reader key: Integer
+    attr_reader left: Integer
+    attr_reader right: Integer
+    def self.new: (Integer key, Integer left, Integer right) -> Pair
+                | (key: Integer, left: Integer, right: Integer) -> Pair
+  end
+
+  class Retired < Data
+    attr_reader side: side
+    attr_reader id: Integer
+    attr_reader key: Integer
+    attr_reader timestamp: Integer
+    def self.new: (side side, Integer id, Integer key, Integer timestamp) -> Retired
+                | (side: side, id: Integer, key: Integer, timestamp: Integer) -> Retired
+  end
+
+  class Join
+    def self.new: (before: Integer, after: Integer) -> Join
+    def before: () -> Integer
+    def after: () -> Integer
+    def capacity: () -> Integer
+    def size: (side) -> Integer
+    def empty?: () -> bool
+    def include?: (side, Integer id) -> bool
+    def insert: (side, Integer id, Integer key, Integer timestamp) -> (:accepted | :pending | :late | :duplicate | :full)
+    def pending?: () -> bool
+    def pending_pairs: () -> Integer
+    def drain: (Integer max) -> Array[Pair]
+    def advance_watermark: (side, Integer value) -> bool
+    def watermark: (side) -> Integer?
+    def retirable: () -> Integer
+    def retire: (Integer max) -> (Array[Retired] | :pending)
+  end
+end
