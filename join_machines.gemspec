@@ -7,7 +7,8 @@ Gem::Specification.new do |spec|
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
   spec.summary = 'Initial native bounded two-input interval-join metadata policy'
-  spec.description = 'Local unstable interval-join bookkeeping over record IDs, not a stream processor or payload store.'
+  spec.description = 'Local unstable interval-join bookkeeping over record IDs, ' \
+                     'not a stream processor or payload store.'
   spec.homepage = 'https://github.com/seuros/join_machines'
   spec.license = 'MIT'
   spec.required_ruby_version = '>= 4.0.0'
