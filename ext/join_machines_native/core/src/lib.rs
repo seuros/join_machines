@@ -1,6 +1,7 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
-use window_machines::Watermark;
+/// Per-input event-time progress, the sibling type this join is built on.
+pub use window_machines::Watermark;
 
 /// One of the two join inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +90,11 @@ impl Bounds {
 }
 
 /// A matched pair of record identities sharing `key`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The `Default` value is an output-buffer placeholder (`[Pair::default(); N]`).
+/// It is not a sentinel: a real pair of zero-valued records equals it, so read
+/// only the entries the call reports.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Pair {
     /// The shared join key.
     pub key: u64,
@@ -106,6 +111,21 @@ pub struct Retired {
     pub side: Side,
     /// The metadata that was held.
     pub record: Record,
+}
+/// An output-buffer placeholder (`[Retired::default(); N]`): a zeroed left
+/// record. It is not a sentinel: a real retired record can equal it, so read
+/// only the entries the call reports.
+impl Default for Retired {
+    fn default() -> Self {
+        Self {
+            side: Side::Left,
+            record: Record {
+                id: 0,
+                key: 0,
+                timestamp: 0,
+            },
+        }
+    }
 }
 
 /// Why a call changed nothing.
@@ -192,9 +212,18 @@ impl<const L: usize, const R: usize> Join<L, R> {
     /// Last accepted watermark of one input, or `None` before the first.
     #[must_use]
     pub const fn watermark(&self, side: Side) -> Option<u64> {
+        self.side_watermark(side).value()
+    }
+
+    /// One input's event-time progress as the sibling [`Watermark`], a copy.
+    ///
+    /// Same state [`watermark`](Self::watermark) reads as an integer; use it to
+    /// ask sibling questions such as [`Watermark::closes`].
+    #[must_use]
+    pub const fn side_watermark(&self, side: Side) -> Watermark {
         match side {
-            Side::Left => self.left_watermark.value(),
-            Side::Right => self.right_watermark.value(),
+            Side::Left => self.left_watermark,
+            Side::Right => self.right_watermark,
         }
     }
 
@@ -305,6 +334,22 @@ impl<const L: usize, const R: usize> Join<L, R> {
         match side {
             Side::Left => self.left_watermark.advance(value),
             Side::Right => self.right_watermark.advance(value),
+        }
+    }
+
+    /// Advance or repeat one input's progress from a caller-owned [`Watermark`].
+    ///
+    /// Returns `true` exactly when the side now equals `source`. A `source`
+    /// with a value behaves as [`advance_watermark`](Self::advance_watermark)
+    /// with that value: a regression returns `false` and changes nothing. A
+    /// `source` with no value yet has nothing to report: it is an accepted
+    /// no-op while the side is uninitialized too, and refused as a regression
+    /// once the side holds a value. It never clears a side.
+    #[must_use]
+    pub fn advance_watermark_from(&mut self, side: Side, source: &Watermark) -> bool {
+        match source.value() {
+            Some(value) => self.advance_watermark(side, value),
+            None => self.watermark(side).is_none(),
         }
     }
 

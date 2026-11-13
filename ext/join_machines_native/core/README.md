@@ -25,12 +25,24 @@ always finds every partner still held. Reaches saturate at the `u64` edges.
 Refusals (`Pending`, `Late`, `Duplicate`, `Full`) change nothing. A full side is
 never evicted. Watermark regressions return `false`.
 
+The sibling seam is public: `Watermark` is re-exported, `side_watermark(side)`
+returns a side's `Watermark` by value (next to `watermark(side)`, which still
+reads the bare `Option<u64>`), and `advance_watermark_from(side, &Watermark)`
+advances a side from a watermark the caller owns, with the same regression
+refusal as `advance_watermark`. A source watermark with no value yet is an
+accepted no-op while the side is also uninitialized and a refused regression
+once the side has a value; it never clears a side.
+
+`Pair` and `Retired` implement `Default` so an output buffer is
+`[Pair::default(); N]`. The default is a placeholder, not a
+sentinel: a real zero-valued output equals it, so read only the entries reported.
+
 This is join bookkeeping only: no payload buffering, transport, execution,
 persistence, key hashing or clocks. Key collisions, watermark generation and
 recovery belong to the caller. Initial, unstable API.
 
 ```rust
-use join_machines::{Bounds, Join, Pair, Record, Refusal, Side};
+use join_machines::{Bounds, Join, Pair, Record, Refusal, Side, Watermark};
 let mut join = Join::<4, 4>::new(Bounds::new(2, 5));
 let record = |id, timestamp| Record { id, key: 9, timestamp };
 assert_eq!(join.insert(Side::Right, record(1, 8)), Ok(()));
@@ -38,13 +50,18 @@ assert_eq!(join.insert(Side::Right, record(2, 15)), Ok(()));
 assert_eq!(join.insert(Side::Left, record(100, 10)), Ok(()));
 assert_eq!(join.insert(Side::Left, record(101, 10)), Err(Refusal::Pending));
 
-let mut out = [Pair { key: 0, left: 0, right: 0 }; 1];
+let mut out = [Pair::default(); 1];
 assert_eq!(join.drain(&mut out), 1);
 assert_eq!(out[0], Pair { key: 9, left: 100, right: 1 });
 assert_eq!(join.drain(&mut out), 1);
 assert_eq!(out[0].right, 2);
 assert!(!join.pending());
 
-assert!(join.advance_watermark(Side::Right, 15));
+// The right input's progress is tracked by a watermark the caller owns.
+let mut right = Watermark::default();
+assert!(right.advance(15));
+assert!(join.advance_watermark_from(Side::Right, &right));
+assert_eq!(join.side_watermark(Side::Right), right);
+assert_eq!(join.watermark(Side::Right), Some(15));
 assert_eq!(join.retirable(), 1);
 ```

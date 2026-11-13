@@ -21,6 +21,11 @@ module JoinMachines
                 | (side: side, id: Integer, key: Integer, timestamp: Integer) -> Retired
   end
 
+  # Anything that reads like WindowMachines::Watermark.
+  interface _Watermark
+    def value: () -> Integer?
+  end
+
   class Join
     def self.new: (before: Integer, after: Integer) -> Join
     def before: () -> Integer
@@ -34,6 +39,7 @@ module JoinMachines
     def pending_pairs: () -> Integer
     def drain: (Integer max) -> Array[Pair]
     def advance_watermark: (side, Integer value) -> bool
+    def advance_watermark_from: (side, _Watermark watermark) -> bool
     def watermark: (side) -> Integer?
     def retirable: () -> Integer
     def retire: (Integer max) -> (Array[Retired] | :pending)

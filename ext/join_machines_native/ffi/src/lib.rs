@@ -106,13 +106,8 @@ impl Wrapper {
         let class = data(ruby, "Pair")?;
         let mut remaining = limit(max);
         let result = ruby.ary_new();
-        let blank = Pair {
-            key: 0,
-            left: 0,
-            right: 0,
-        };
         while remaining > 0 {
-            let mut buffer = [blank; CHUNK];
+            let mut buffer = [Pair::default(); CHUNK];
             let room = remaining.min(CHUNK);
             let written = this.core.borrow_mut().drain(&mut buffer[..room]);
             for pair in &buffer[..written] {
@@ -154,16 +149,8 @@ impl Wrapper {
         }
         let mut remaining = limit(max);
         let result = ruby.ary_new();
-        let blank = Retired {
-            side: Side::Left,
-            record: Record {
-                id: 0,
-                key: 0,
-                timestamp: 0,
-            },
-        };
         while remaining > 0 {
-            let mut buffer = [blank; CHUNK];
+            let mut buffer = [Retired::default(); CHUNK];
             let room = remaining.min(CHUNK);
             let Ok(written) = this.core.borrow_mut().retire(&mut buffer[..room]) else {
                 break;

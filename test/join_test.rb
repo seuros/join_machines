@@ -134,6 +134,72 @@ class JoinTest < Minitest::Test
     assert_nil j.watermark(:left)
   end
 
+  # Reads like WindowMachines::Watermark without depending on that gem.
+  class Mark
+    attr_reader :value
+
+    def advance(value)
+      return false if @value && value < @value
+
+      @value = value
+      true
+    end
+  end
+
+  def test_caller_owned_watermark_stays_in_lockstep
+    j = join
+    marks = { left: Mark.new, right: Mark.new }
+    marks.each do |side, mark|
+      assert j.advance_watermark_from(side, mark)
+      assert_nil j.watermark(side)
+    end
+    [[:left, 3], [:right, 9], [:left, 3], [:left, 7], [:right, MAX]].each do |side, value|
+      assert marks[side].advance(value)
+      assert j.advance_watermark_from(side, marks[side])
+      assert_equal marks.transform_values(&:value), { left: j.watermark(:left), right: j.watermark(:right) }
+    end
+    assert_equal :late, j.insert(:left, 1, 1, 7)
+    assert_equal :accepted, j.insert(:left, 1, 1, 8)
+  end
+
+  def test_regressing_caller_watermark_is_refused_without_mutation
+    j = join
+    j.insert(:left, 1, 9, 10)
+    assert j.advance_watermark(:right, 12)
+    behind = Mark.new
+    behind.advance(11)
+    refute j.advance_watermark_from(:right, behind)
+    refute j.advance_watermark_from(:right, Mark.new)
+    assert_equal 12, j.watermark(:right)
+    assert_nil j.watermark(:left)
+    assert_equal [1, 0, 0], [j.size(:left), j.size(:right), j.retirable]
+    assert_equal 11, behind.value
+  end
+
+  def test_advance_watermark_from_is_strict
+    j = join
+    mark = Mark.new
+    [1, nil, '1', Object.new].each do |bad|
+      assert_raises(TypeError) { j.advance_watermark_from(:left, bad) }
+    end
+    [1.0, '1', Object.new].each do |bad|
+      assert_raises(TypeError) { j.advance_watermark_from(:left, Data.define(:value).new(bad)) }
+    end
+    [-1, MAX + 1].each do |bad|
+      assert_raises(RangeError) { j.advance_watermark_from(:left, Data.define(:value).new(bad)) }
+    end
+    assert_raises(TypeError) { j.advance_watermark_from(nil, mark) }
+    assert_raises(ArgumentError) { j.advance_watermark_from(:middle, mark) }
+    mark.advance(4)
+    assert_raises(TypeError) { j.advance_watermark_from(nil, mark) }
+    assert_raises(ArgumentError) { j.advance_watermark_from(:middle, mark) }
+    assert_nil j.watermark(:left)
+    j.freeze
+    assert_raises(FrozenError) { j.advance_watermark_from(:left, mark) }
+    assert_raises(FrozenError) { j.advance_watermark_from(:left, Mark.new) }
+    assert_nil j.watermark(:left)
+  end
+
   def test_frozen_join_refuses_mutation
     j = join
     j.insert(:left, 1, 1, 1)

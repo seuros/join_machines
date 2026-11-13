@@ -412,3 +412,5 @@ fn randomized_runs_match_the_naive_model() {
     run_model(7, u64::MAX, u64::MAX, 0);
     run_model(8, 0, 0, 0);
 }
+
+mod seam;

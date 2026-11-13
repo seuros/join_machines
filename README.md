@@ -163,6 +163,17 @@ join.drain(8)
 
 Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. Advancing a watermark removes nothing by itself.
 
+If you already track a stream's progress in a watermark object, hand it over instead of unwrapping it:
+
+```ruby
+clicks = WindowMachines::Watermark.new   # from the window_machines gem, if you use it
+clicks.advance(14)
+join.advance_watermark_from(:right, clicks)   # => true, the side already agrees
+join.watermark(:right)                        # => 14
+```
+
+`advance_watermark_from(side, watermark)` reads `watermark.value` and answers like `advance_watermark`: `true` when the side now equals it, `false` and no change when it is behind. Any object with a `value` reader returning an Integer or `nil` works; this gem does not depend on `window_machines`. A `nil` value means nothing was observed yet: `true` and nothing to do while the side is `nil` too, `false` once the side has a value. An object without `value` raises `TypeError`.
+
 ### Retire
 
 ```ruby
@@ -192,7 +203,7 @@ Each side holds 64 records. Past that, `insert` says `:full`. A record is never 
 - **One record's pairs at a time.** Drain what the last insert owes before inserting or retiring.
 - **Late is judged by a record's own side. Retirement is judged by the other side.** That asymmetry is what makes it safe: a record that is not late always finds every partner it should still held.
 - **Time saturates at the edges.** A reach that would run below 0 or past `2**64-1` stops there.
-- **Frozen means frozen.** `freeze` the join and `insert`, `drain`, `advance_watermark`, and `retire` raise `FrozenError`.
+- **Frozen means frozen.** `freeze` the join and `insert`, `drain`, `advance_watermark`, `advance_watermark_from`, and `retire` raise `FrozenError`.
 
 ## What You Think You're Doing vs Reality
 
