@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/join_machines/compare/join_machines/v0.1.1...join_machines/v0.1.2) (2026-11-13)
+
+
+### Features
+
+* expose the window-machines Watermark seam and default output elements ([51df744](https://github.com/seuros/join_machines/commit/51df744004344e4679adf8ccfe308ad68337eca8))
+
 ## [0.1.1](https://github.com/seuros/join_machines/compare/join_machines-v0.1.0...join_machines/v0.1.1) (2026-11-12)
 
 
