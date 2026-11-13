@@ -19,9 +19,9 @@ join = JoinMachines::Join.new(JoinMachines::Bounds.new(before: 30_000, after: 0)
 def on_record(join, side, record, store)
   case join.insert(side, JoinMachines::Record.new(record.id, record.ad_id, record.event_ms))
   when :late      then return count_late(record)
-  when :duplicate then return
+  when :mismatch  then return count_conflict(record) # this id is held with other contents
   when :full      then raise 'join is full: advance the watermarks and retire'
-  end
+  end # :accepted, or :duplicate for a replay of a held record: nothing new is owed
   store[side][record.id] = record
 
   until (pairs = join.drain(100)).empty?
@@ -37,7 +37,7 @@ def on_watermark(join, side, event_ms, store)
 end
 ```
 
-Ids, keys, and times are Integers. Time is event time in whatever unit you pick, as long as both inputs agree.
+Ids, keys, and times are Integers. Time is event time in whatever unit you pick, as long as both inputs agree. Each side's watermark speaks for its own input only: one input running well ahead of the other makes nothing `:late` on the slower one.
 
 ## A Message to the Resistance
 
@@ -75,10 +75,11 @@ Each record the join holds goes through this:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> refused: insert → :late, :duplicate, :full, :pending
+    [*] --> refused: insert → :mismatch, :pending, :late, :full
     [*] --> held: insert → :accepted
+    held --> held: insert of the same record → :duplicate
     held --> held: pairs with it are drained
-    held --> retirable: opposite watermark passes its reach
+    held --> retirable: opposite watermark passes its reach and its own watermark reaches it
     retirable --> [*]: retire, returns a Retired
 ```
 
@@ -103,7 +104,10 @@ sequenceDiagram
     J-->>C: [Pair(9, 100, 2)]
     C->>J: advance_watermark(:right, 15)
     C->>J: retire(10)
-    J-->>C: [Retired(:left, Record(100, 9, 10))]
+    J-->>C: [] (the left watermark has not reached 100)
+    C->>J: advance_watermark(:left, 10)
+    C->>J: retire(10)
+    J-->>C: [Retired(:left, Record(100, 9, 10)), Retired(:right, Record(1, 9, 8))]
 ```
 
 ## How the Join Works
@@ -137,6 +141,15 @@ join.pending_pairs                           # => 2
 
 `insert(side, record)` takes a `Record`, the same value `retire` hands back. An accepted record is held, and the join now owes one pair for every held record on the other side with the same key inside the interval. The ids are yours. They only have to be unique among the records currently held on the same side.
 
+Replaying a record the join still holds is fine. The same id with the same key and timestamp answers `:duplicate`: honoured, nothing changes, and no pair is owed a second time. The same id with a different key or timestamp answers `:mismatch`, a refusal. A held id is answered this way before anything else is looked at, so a replay is `:duplicate` even while pairs are owed or after the side's watermark has passed the record.
+
+```ruby
+join.insert(:left, Record.new(100, 9, 10))   # => :duplicate, already held, still owes 2 pairs
+join.insert(:left, Record.new(100, 9, 11))   # => :mismatch, id 100 is held with timestamp 10
+```
+
+Held means held right now. A record that matched and was drained is still held. A record that was retired is not, but it cannot come back: it was let go only after its own side's watermark had reached it, and that watermark never moves back, so the same record replayed is `:late`, every time, and no pair is handed over twice. The join does this without keeping any history, which also means it does not remember the id itself: a *different* record under a retired id is judged like any new one. Keep one id for one record and replays across retirement are safe.
+
 ### Drain
 
 ```ruby
@@ -168,20 +181,20 @@ join.insert(:right, Record.new(4, 9, 15))     # => :accepted
 join.drain(8)
 ```
 
-Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. Advancing a watermark removes nothing by itself. Repeating the value a side already holds is not a refusal: the promise you are making already stands, so the answer is `:repeated`. Only a value behind the side's watermark is refused, with `:watermark_regressed`.
+Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. The *other* side's watermark never makes a record late: if its partner is still held, the record is accepted and the pair is owed, however far apart the two watermarks are. Advancing a watermark removes nothing by itself. Repeating the value a side already holds is not a refusal: the promise you are making already stands, so the answer is `:repeated`. Only a value behind the side's watermark is refused, with `:watermark_regressed`.
 
 If you already track a stream's progress in a watermark object, hand it over instead of unwrapping it:
 
 ```ruby
 clicks = WindowMachines::Watermark.new   # from the window_machines gem, if you use it
-clicks.advance(14)
+clicks.advance(14)                            # => :advanced
 join.advance_watermark_from(:right, clicks)   # => :repeated, the side already agrees
 join.watermark(:right)                        # => 14
 join.side_watermark(:right)                   # => #<data JoinMachines::Watermark value=14>
 join.side_watermark(:left)                    # => #<data JoinMachines::Watermark value=nil>
 ```
 
-`advance_watermark_from(side, watermark)` reads `watermark.value` and answers like `advance_watermark`: `:advanced` when the side moved up to it, `:repeated` when the side already equals it, `:watermark_regressed` and no change when it is behind. Any object with a `value` reader returning an Integer or `nil` works; this gem does not depend on `window_machines`. A `nil` value means nothing was observed yet: `:repeated` while the side is `nil` too, `:watermark_regressed` once the side has a value. An object without `value` raises `TypeError`.
+`advance_watermark_from(side, watermark)` reads `watermark.value` and answers like `advance_watermark`: `:advanced` when the side moved up to it, `:repeated` when the side already equals it, `:watermark_regressed` and no change when it is behind. Any object with a `value` reader returning an Integer or `nil` works; this gem does not depend on `window_machines`. A `WindowMachines::Watermark` fits as it is, whether you advanced it yourself, built it with `Watermark.at(saved)`, or took the copy `Sessions#watermark` answers; only its `value` is read, and it is never advanced for you. A `nil` value means nothing was observed yet: `:repeated` while the side is `nil` too, `:watermark_regressed` once the side has a value. An object without `value` raises `TypeError`.
 
 `side_watermark(side)` is the other direction: the side's progress as a `JoinMachines::Watermark`, a frozen `Data` with the one reader `value` (an Integer, or `nil` before the first watermark). That is exactly the shape `advance_watermark_from` reads, so one join's side can be handed to another join. It is a copy taken at the call, not a live view, and it does not advance; `watermark(side)` is the same number without the wrapper.
 
@@ -190,13 +203,17 @@ join.side_watermark(:left)                    # => #<data JoinMachines::Watermar
 ```ruby
 join.retirable                       # => 0
 join.advance_watermark(:right, 15)   # left 100 reached right times 8..15
-join.retirable                       # => 1
+join.retirable                       # => 0, a replay of left 100 would not be late yet
+join.advance_watermark(:left, 10)    # now it would be; right 1 reached left times 3..10
+join.retirable                       # => 2
 join.retire(10)
 # => [#<data JoinMachines::Retired side=:left,
-#       record=#<data JoinMachines::Record id=100, key=9, timestamp=10>>]
+#       record=#<data JoinMachines::Record id=100, key=9, timestamp=10>>,
+#     #<data JoinMachines::Retired side=:right,
+#       record=#<data JoinMachines::Record id=1, key=9, timestamp=8>>]
 ```
 
-A held record is finished when the *other* side's watermark reaches the last time it could match. From then on nothing admissible can pair with it. `retire(max)` removes up to `max` finished records and tells you which, so you can drop their payloads: each `Retired` is the `side` and the `Record` (`id`, `key`, `timestamp`) that was held. Anything over `max` stays `retirable` for the next call.
+A held record is finished when two things are true. The *other* side's watermark has reached the last time it could match (`timestamp + after` for a left record, `timestamp + before` for a right one, stopping at `2**64-1`), so nothing that can still arrive pairs with it. And its *own* side's watermark has reached its timestamp, so the same record offered again is `:late`. The first makes dropping it lossless, the second makes it final. A record whose own side lags stays held until that side catches up. `retire(max)` removes up to `max` finished records and tells you which, so you can drop their payloads: each `Retired` is the `side` and the `Record` (`id`, `key`, `timestamp`) that was held. Anything over `max` stays `retirable` for the next call.
 
 ### Capacity
 
@@ -212,19 +229,21 @@ Each side holds 64 records. Past that, `insert` says `:full`. A record is never 
 ## The Rules of the Tender
 
 - **Ids, keys, times, bounds, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. A side that isn't `:left` or `:right` raises `ArgumentError` (or `TypeError` if it isn't a Symbol).
-- **Refusals don't raise.** `:pending`, `:late`, `:duplicate`, `:full` and `:watermark_regressed` are answers, each with its own symbol and no catch-all, and a refused call changes nothing. Only malformed input raises.
+- **Refusals don't raise.** `:mismatch`, `:pending`, `:late`, `:full` and `:watermark_regressed` are answers, each with its own symbol and no catch-all, and a refused call changes nothing. Only malformed input raises.
 - **Every answer, by method.**
 
   | Method | Honoured | Refused |
   | --- | --- | --- |
-  | `insert(side, record)` | `:accepted` | `:pending`, `:late`, `:duplicate`, `:full` |
+  | `insert(side, record)` | `:accepted`, or `:duplicate` when exactly that record is already held | `:mismatch`, `:pending`, `:late`, `:full` |
   | `drain(max)` | an Array of `Pair`, `[]` when none is owed | never refuses |
   | `advance_watermark(side, value)` | `:advanced`, or `:repeated` when the side already held `value` | `:watermark_regressed` |
   | `advance_watermark_from(side, watermark)` | `:advanced`, or `:repeated` when the side already equals it | `:watermark_regressed` |
   | `retire(max)` | an Array of `Retired`, `[]` when none is retirable | `:pending` |
 - **Arguments are the core's values.** `Join.new` takes a `Bounds`, `insert` takes a `Record`. A Hash, an Array or loose Integers in their place raise `TypeError` or `ArgumentError`.
+- **Repeats are honoured only while provable.** `:duplicate` means the join holds that exact record on that side right now, and changes nothing. It is never a refusal. A retired record leaves no trace, so a replay of it is not `:duplicate`; it is `:late`, because its own side's watermark had reached it before it was let go and never moves back.
 - **One record's pairs at a time.** Drain what the last insert owes before inserting or retiring.
-- **Late is judged by a record's own side. Retirement is judged by the other side.** That asymmetry is what makes it safe: a record that is not late always finds every partner it should still held.
+- **Late is judged on one watermark. Retirement is judged on both.** A record is `:late` at or below its own side's watermark and for no other reason, so a record whose partner is held is never turned away because of the other input. `retire` releases a held record at `t` only when the other side's watermark is at or past the end of its reach (`>= bounds.reach(side, t).last`: nothing still to come can match it) *and* its own side's watermark is at or past `t` (a replay is `:late`). So nothing matchable is ever refused, a retired record replayed is `:late` for good, and every pair is handed over exactly once.
+- **A lagging side keeps its records.** A side whose own watermark is behind holds its records longer, however far the other side has run, and a side whose watermark never moves retires nothing. That costs slots, never pairs: the bound is the capacity, and past it `insert` says `:full`. Advance both watermarks to release records.
 - **Time saturates at the edges.** A reach that would run below 0 or past `2**64-1` stops there.
 - **Frozen means frozen.** `freeze` the join and `insert`, `drain`, `advance_watermark`, `advance_watermark_from`, and `retire` raise `FrozenError`.
 
@@ -233,7 +252,7 @@ Each side holds 64 records. Past that, `insert` says `:full`. A record is never 
 ### You Think: "I'll expire old records after the window has passed."
 ### Reality: Passed according to whom?
 
-Your wall clock says thirty seconds went by. The click stream, three partitions behind, has not been told. A record is finished when the stream it is waiting on says it has moved on, and the only thing that can say that is that stream's watermark. `retire` uses nothing else.
+Your wall clock says thirty seconds went by. The click stream, three partitions behind, has not been told. A record is finished when the stream it is waiting on says it has moved on, and the only thing that can say that is that stream's watermark. `retire` asks that, and asks the record's own stream whether it could still be delivered again.
 
 ### You Think: "A record matches, I emit a pair."
 ### Reality: A record matches four hundred, and your output buffer holds fifty.
@@ -244,7 +263,7 @@ A join's output per input is not bounded by one. `drain(max)` makes the batch si
 
 The payloads. The join stores three Integers per record and nothing else, so you keep a store keyed by side and id and delete from it when `retire` says so. Hashing a wide key down to an Integer is also yours, and so is checking the real key on a pair if your hash can collide.
 
-The watermarks. The join believes them. Advance one too eagerly and the records it would have matched come back `:late`. Never advance one and both sides fill up and stay `:full`.
+The watermarks. The join believes them. Advance one too eagerly and that side's own records come back `:late`; the other side's never do. Never advance one and both sides fill up and stay `:full`.
 
 Everything else a stream processor does: reading inputs, running the user's function on a pair, checkpointing, restoring after a crash. The join lives in your process and forgets everything when the process does. Pairs you drained before a crash are not remembered as drained by anyone but you.
 

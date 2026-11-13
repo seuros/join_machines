@@ -20,7 +20,7 @@ fn caller_owned_watermark_in_lockstep_equals_the_joins_own() {
         } else {
             Advancing::Advanced
         };
-        assert!(owned[index].advance(value));
+        assert_eq!(owned[index].advance(value), Ok(expected));
         let held = join.clone();
         assert_eq!(
             join.advance_watermark_from(side, &owned[index]),
@@ -36,25 +36,39 @@ fn caller_owned_watermark_in_lockstep_equals_the_joins_own() {
         join.advance_watermark(Side::Left, 20),
         Ok(Advancing::Advanced)
     );
-    assert!(owned[0].advance(20));
+    assert_eq!(owned[0].advance(20), Ok(Advancing::Advanced));
     assert_eq!(join.side_watermark(Side::Left), owned[0]);
     assert_eq!(join.insert(Side::Left, rec(1, 1, 20)), Err(Refusal::Late));
-    assert_eq!(join.insert(Side::Left, rec(1, 1, 21)), Ok(()));
+    // Lateness is judged on the record's own side only: the right watermark
+    // at `u64::MAX` refuses every right record and no left one.
+    assert_eq!(join.insert(Side::Left, rec(1, 1, 21)), ACCEPTED);
+    assert_eq!(join.insert(Side::Right, rec(1, 1, u64::MAX)), LATE);
+    assert_eq!((join.len(Side::Left), join.len(Side::Right)), (1, 0));
+    // No right record can ever match it, but it leaves only once its own
+    // watermark reaches it and a replay would be late.
+    assert_eq!(join.retirable(), 0);
+    advance(&mut join, Side::Left, 21);
+    assert_eq!(join.retirable(), 1);
 }
 
 #[test]
 fn regression_through_a_caller_watermark_is_refused_without_mutation() {
     let mut join = Join::<4, 4>::new(Bounds::new(2, 5));
-    assert_eq!(join.insert(Side::Left, rec(1, 9, 10)), Ok(()));
-    assert_eq!(join.insert(Side::Right, rec(2, 9, 30)), Ok(()));
+    assert_eq!(
+        join.insert(Side::Left, rec(1, 9, 10)),
+        Ok(Inserting::Accepted)
+    );
+    assert_eq!(
+        join.insert(Side::Right, rec(2, 9, 30)),
+        Ok(Inserting::Accepted)
+    );
     assert_eq!(
         join.advance_watermark(Side::Right, 12),
         Ok(Advancing::Advanced)
     );
     let before = join.clone();
 
-    let mut behind = Watermark::default();
-    assert!(behind.advance(11));
+    let behind = Watermark::at(11);
     assert_eq!(
         join.advance_watermark_from(Side::Right, &behind),
         Err(Refusal::WatermarkRegressed)
@@ -94,8 +108,14 @@ fn output_element_defaults_are_overwritten_placeholders() {
     assert_eq!(Pair::default(), BLANK);
     assert_eq!(Retired::default(), GONE);
     let mut join = Join::<4, 4>::new(Bounds::new(0, 0));
-    assert_eq!(join.insert(Side::Right, rec(7, 3, 5)), Ok(()));
-    assert_eq!(join.insert(Side::Left, rec(8, 3, 5)), Ok(()));
+    assert_eq!(
+        join.insert(Side::Right, rec(7, 3, 5)),
+        Ok(Inserting::Accepted)
+    );
+    assert_eq!(
+        join.insert(Side::Left, rec(8, 3, 5)),
+        Ok(Inserting::Accepted)
+    );
     let mut pairs = [Pair::default(); 3];
     assert_eq!(join.drain(&mut pairs), 1);
     assert_eq!(
@@ -110,13 +130,11 @@ fn output_element_defaults_are_overwritten_placeholders() {
             Pair::default()
         ]
     );
-    assert_eq!(
-        join.advance_watermark(Side::Left, 5),
-        Ok(Advancing::Advanced)
-    );
+    advance(&mut join, Side::Left, 5);
+    advance(&mut join, Side::Right, 5);
     let mut gone = [Retired::default(); 3];
-    assert_eq!(join.retire(&mut gone), Ok(1));
-    assert_eq!(gone[0].record, rec(7, 3, 5));
-    assert_eq!(gone[0].side, Side::Right);
-    assert_eq!(gone[1..], [Retired::default(); 2]);
+    assert_eq!(join.retire(&mut gone), Ok(2));
+    assert_eq!((gone[0].side, gone[0].record), (Side::Left, rec(8, 3, 5)));
+    assert_eq!((gone[1].side, gone[1].record), (Side::Right, rec(7, 3, 5)));
+    assert_eq!(gone[2], Retired::default());
 }

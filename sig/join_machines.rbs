@@ -7,7 +7,7 @@ module JoinMachines
 
   # Refusals: the call was not honoured and changed nothing. Every reason has
   # its own symbol; there is no catch-all.
-  type refusal = :pending | :late | :duplicate | :full | :watermark_regressed
+  type refusal = :mismatch | :pending | :late | :full | :watermark_regressed
 
   # The core's `Advancing`: what an accepted watermark did.
   type advancing = :advanced | :repeated
@@ -81,8 +81,13 @@ module JoinMachines
     def empty?: () -> bool
     # The core's `contains`.
     def include?: (side, Integer id) -> bool
-    # Honoured: :accepted. Refused: :pending, :late, :duplicate, :full.
-    def insert: (side, Record record) -> (:accepted | :pending | :late | :duplicate | :full)
+    # Honoured: :accepted, or :duplicate (the core's `Inserting`) when exactly
+    # this record is already held on that side: nothing changes and no pair is
+    # owed twice. Refused: :mismatch (the id is held with another key or
+    # timestamp), :pending, :late (at or below its own side's watermark; the
+    # other side's watermark never makes a record late), :full. A held id is
+    # answered first.
+    def insert: (side, Record record) -> (:accepted | :duplicate | :mismatch | :pending | :late | :full)
     def pending?: () -> bool
     def pending_pairs: () -> Integer
     # At most `max` owed pairs, [] when none is owed. Never refuses.
@@ -99,6 +104,9 @@ module JoinMachines
     def watermark: (side) -> Integer?
     # The same state as a Watermark value, never nil itself.
     def side_watermark: (side) -> Watermark
+    # Held records both watermarks have finished: the other side's is at or
+    # past the end of the record's reach, and its own is at or past its
+    # timestamp (so a replay of it is :late).
     def retirable: () -> Integer
     # Honoured: the retired records, [] when none is retirable. Refused: :pending.
     def retire: (Integer max) -> (Array[Retired] | :pending)

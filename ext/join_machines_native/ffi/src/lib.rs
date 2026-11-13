@@ -3,7 +3,9 @@ mod init;
 
 use std::cell::RefCell;
 
-use join_machines::{Advancing, Bounds, Join, Pair, Record, Refusal, Retired, Side, Watermark};
+use join_machines::{
+    Advancing, Bounds, Inserting, Join, Pair, Record, Refusal, Retired, Side, Watermark,
+};
 use magnus::{
     Error, Integer, RArray, RClass, RModule, Ruby, Symbol, TryConvert, Value, prelude::*,
     typed_data::Obj,
@@ -111,9 +113,9 @@ impl TryConvert for Entry {
 /// Ruby symbol name of a refusal: the snake case of the core variant.
 const fn refusal(refused: Refusal) -> &'static str {
     match refused {
+        Refusal::Mismatch => "mismatch",
         Refusal::Pending => "pending",
         Refusal::Late => "late",
-        Refusal::Duplicate => "duplicate",
         Refusal::Full => "full",
         Refusal::WatermarkRegressed => "watermark_regressed",
     }
@@ -159,7 +161,8 @@ impl Wrapper {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().insert(input.0, record.0);
         Ok(ruby.to_symbol(match outcome {
-            Ok(()) => "accepted",
+            Ok(Inserting::Accepted) => "accepted",
+            Ok(Inserting::Duplicate) => "duplicate",
             Err(refused) => refusal(refused),
         }))
     }
@@ -219,11 +222,10 @@ impl Wrapper {
             ));
         }
         let value: Option<Value> = watermark.funcall("value", ())?;
-        let mut source = Watermark::default();
-        if let Some(value) = value {
-            // A fresh watermark takes any first value.
-            let _first = source.advance(Number::try_convert(value)?.0);
-        }
+        let source = match value {
+            Some(value) => Watermark::at(Number::try_convert(value)?.0),
+            None => Watermark::default(),
+        };
         let outcome = this
             .core
             .borrow_mut()

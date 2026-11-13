@@ -71,10 +71,98 @@ class JoinTest < Minitest::Test
     assert_equal 0, j.pending_pairs
   end
 
-  def test_late_duplicate_and_full_are_symbols
+  def test_a_replayed_record_is_honoured_and_other_contents_are_a_mismatch
+    j = join
+    assert_equal :accepted, j.insert(:right, rec(7, 9, 10))
+    assert_equal :accepted, j.insert(:left, rec(1, 9, 10))
+    # A held id is answered first, even while pairs are owed.
+    assert_equal :duplicate, j.insert(:left, rec(1, 9, 10))
+    assert_equal :mismatch, j.insert(:left, rec(1, 9, 11))
+    assert_equal :mismatch, j.insert(:left, rec(1, 8, 10))
+    assert_equal :pending, j.insert(:left, rec(2, 9, 10))
+    assert_equal [1, 1], [j.size(:left), j.pending_pairs]
+    assert_equal [JoinMachines::Pair.new(9, 1, 7)], j.drain(8)
+    # Matched and drained is still held: nothing is emitted twice.
+    assert_equal :duplicate, j.insert(:left, rec(1, 9, 10))
+    assert_equal :duplicate, j.insert(:right, rec(7, 9, 10))
+    refute j.pending?
+    assert_empty j.drain(8)
+  end
+
+  def test_a_replay_after_retirement_is_late_and_emits_no_pair_twice
+    j = join(before: 2, after: 2)
+    left = rec(1, 7, 10)
+    assert_equal :accepted, j.insert(:left, left)
+    assert_equal :accepted, j.insert(:right, rec(2, 7, 11))
+    assert_equal [J::Pair.new(7, 1, 2)], j.drain(1)
+    # Only the right watermark moves: nothing can match the left record any
+    # more, but a replay of it would not be late, so it is not retired.
+    assert_equal :advanced, j.advance_watermark(:right, 12)
+    assert_equal 0, j.retirable
+    assert_empty j.retire(8)
+    assert_equal :duplicate, j.insert(:left, left)
+    refute j.pending?
+    assert_equal :advanced, j.advance_watermark(:left, 9)
+    assert_equal 0, j.retirable
+    assert_equal :advanced, j.advance_watermark(:left, 10)
+    assert_equal [J::Retired.new(:left, left)], j.retire(8)
+    2.times { assert_equal :late, j.insert(:left, left) }
+    refute j.pending?
+    assert_empty j.drain(8)
+    assert_equal 0, j.size(:left)
+  end
+
+  def test_a_matchable_record_is_never_late_because_of_the_other_side
+    # The right watermark is past everything left 10 can match, the left one
+    # is unset, and the partner is still held.
+    j = join(before: 2, after: 2)
+    assert_equal :accepted, j.insert(:right, rec(2, 7, 11))
+    assert_equal :advanced, j.advance_watermark(:right, 12)
+    assert_equal :accepted, j.insert(:left, rec(1, 7, 10))
+    assert_equal [J::Pair.new(7, 1, 2)], j.drain(8)
+    # after: 0, with the right watermark at the record's time and far past it.
+    j = join(before: 5, after: 0)
+    assert_equal :accepted, j.insert(:right, rec(2, 7, 10))
+    assert_equal :advanced, j.advance_watermark(:right, 10)
+    assert_equal :accepted, j.insert(:left, rec(1, 7, 10))
+    assert_equal [J::Pair.new(7, 1, 2)], j.drain(8)
+    assert_equal :advanced, j.advance_watermark(:right, MAX)
+    assert_equal :accepted, j.insert(:left, rec(3, 7, 15))
+    assert_equal [J::Pair.new(7, 3, 2)], j.drain(8)
+    assert_equal :late, j.insert(:right, rec(4, 7, MAX))
+  end
+
+  def test_a_lagging_side_keeps_its_records_until_full
+    j = join(before: 0, after: 0)
+    64.times { |id| assert_equal :accepted, j.insert(:left, rec(id, 0, 5 + id)) }
+    assert_equal :advanced, j.advance_watermark(:right, MAX)
+    assert_equal 0, j.retirable
+    assert_equal :full, j.insert(:left, rec(64, 0, 500))
+    assert_equal :advanced, j.advance_watermark(:left, 6)
+    assert_equal [0, 1], j.retire(8).map { it.record.id }
+    assert_equal :accepted, j.insert(:left, rec(64, 0, 500))
+  end
+
+  def test_a_retired_identity_is_not_remembered
+    j = join(before: 0, after: 0)
+    assert_equal :accepted, j.insert(:left, rec(1, 0, 5))
+    assert_equal :advanced, j.advance_watermark(:right, 5)
+    assert_empty j.retire(8)
+    assert_equal :advanced, j.advance_watermark(:left, 5)
+    assert_equal 1, j.retire(8).size
+    assert_equal :late, j.insert(:left, rec(1, 0, 5))
+    assert_equal :accepted, j.insert(:left, rec(1, 3, 9))
+    assert_equal :duplicate, j.insert(:left, rec(1, 3, 9))
+    assert_equal :advanced, j.advance_watermark(:right, 9)
+    assert_equal :advanced, j.advance_watermark(:left, 9)
+    assert_equal 1, j.retire(8).size
+    assert_equal :late, j.insert(:left, rec(1, 3, 9))
+  end
+
+  def test_late_mismatch_and_full_are_symbols
     j = join
     assert_equal :accepted, j.insert(:left, rec(1, 0, 5))
-    assert_equal :duplicate, j.insert(:left, rec(1, 3, 9))
+    assert_equal :mismatch, j.insert(:left, rec(1, 3, 9))
     assert_equal :accepted, j.insert(:right, rec(1, 7, 50))
     assert_equal :advanced, j.advance_watermark(:left, 6)
     assert_equal :late, j.insert(:left, rec(2, 0, 6))
@@ -96,6 +184,11 @@ class JoinTest < Minitest::Test
     assert_equal :advanced, j.advance_watermark(:right, 14)
     assert_equal 0, j.retirable
     assert_equal :advanced, j.advance_watermark(:right, 16)
+    # The left watermark has reached neither record: both stay.
+    assert_equal 0, j.retirable
+    assert_equal :advanced, j.advance_watermark(:left, 10)
+    assert_equal 1, j.retirable
+    assert_equal :advanced, j.advance_watermark(:left, 11)
     assert_equal 2, j.retirable
     assert_equal [], j.retire(0)
     first = JoinMachines::Record.new(id: 1, key: 0, timestamp: 10)
@@ -120,7 +213,15 @@ class JoinTest < Minitest::Test
     assert_equal [JoinMachines::Pair.new(MAX, MAX, MAX)], j.drain(1)
     assert_equal :advanced, j.advance_watermark(:right, MAX)
     assert_equal :late, j.insert(:right, rec(1, 1, MAX))
-    assert_equal [:left], j.retire(5).map(&:side)
+    # The right input is closed for good; the left one is not late for it.
+    assert_equal :accepted, j.insert(:left, rec(2, MAX, 5))
+    assert_equal [JoinMachines::Pair.new(MAX, 2, MAX)], j.drain(1)
+    assert_empty j.retire(5)
+    assert_equal :advanced, j.advance_watermark(:left, 0)
+    assert_equal [rec(MAX, MAX, 0)], j.retire(5).map(&:record)
+    assert_equal :advanced, j.advance_watermark(:left, MAX)
+    assert_equal %i[left right], j.retire(5).map(&:side)
+    assert_predicate j, :empty?
   end
 
   def test_strict_inputs_before_mutation
@@ -163,10 +264,11 @@ class JoinTest < Minitest::Test
     attr_reader :value
 
     def advance(value)
-      return false if @value && value < @value
+      return :regressed if @value && value < @value
+      return :repeated if @value == value
 
       @value = value
-      true
+      :advanced
     end
   end
 
@@ -180,12 +282,18 @@ class JoinTest < Minitest::Test
     steps = [[:left, 3, :advanced], [:right, 9, :advanced], [:left, 3, :repeated], [:left, 7, :advanced],
              [:right, MAX, :advanced]]
     steps.each do |side, value, answer|
-      assert marks[side].advance(value)
+      assert_equal answer, marks[side].advance(value)
       assert_equal answer, j.advance_watermark_from(side, marks[side])
       assert_equal marks.transform_values(&:value), { left: j.watermark(:left), right: j.watermark(:right) }
     end
     assert_equal :late, j.insert(:left, rec(1, 1, 7))
+    # Lateness is the record's own side's: the right watermark at MAX refuses
+    # every right record and no left one.
     assert_equal :accepted, j.insert(:left, rec(1, 1, 8))
+    assert_equal :late, j.insert(:right, rec(1, 1, MAX))
+    assert_equal [1, 0, 0], [j.size(:left), j.size(:right), j.retirable]
+    assert_equal :advanced, j.advance_watermark(:left, 8)
+    assert_equal 1, j.retirable
   end
 
   def test_regressing_caller_watermark_is_refused_without_mutation

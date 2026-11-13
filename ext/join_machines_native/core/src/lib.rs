@@ -1,7 +1,10 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
-/// Per-input event-time progress, the sibling type this join is built on.
-pub use window_machines::Watermark;
+/// Per-input event-time progress, the sibling type this join is built on, and
+/// what an honoured advance of it did: `Advanced`, or `Repeated` for an
+/// idempotent repeat that changed nothing. Both are honoured; neither is a
+/// refusal.
+pub use window_machines::{Advancing, Watermark};
 
 mod refusal;
 
@@ -132,14 +135,14 @@ impl Default for Retired {
     }
 }
 
-/// What an accepted watermark did. Both are honoured; neither is a refusal.
+/// What an honoured [`Join::insert`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Advancing {
-    /// The side moved forward to the value given.
-    Advanced,
-    /// The side already stood exactly there: an idempotent repeat that
-    /// changed nothing.
-    Repeated,
+pub enum Inserting {
+    /// The record is now held and its pairs are owed.
+    Accepted,
+    /// An idempotent repeat: this exact record (same side, identity, key and
+    /// timestamp) is already held. Nothing changed and no pair is owed twice.
+    Duplicate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +209,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
     /// Whether a live record on `side` uses this identity.
     #[must_use]
     pub fn contains(&self, side: Side, id: u64) -> bool {
-        self.slots(side).iter().flatten().any(|held| held.id == id)
+        self.held(side, id).is_some()
     }
 
     /// Last accepted watermark of one input, or `None` before the first.
@@ -229,22 +232,39 @@ impl<const L: usize, const R: usize> Join<L, R> {
 
     /// Admit a record and owe every pair it forms with held opposite records.
     ///
+    /// A record whose identity is already held on `side` is answered from the
+    /// held record, before anything else is checked: the same key and
+    /// timestamp is the effect asked for already holding,
+    /// [`Inserting::Duplicate`], and nothing changes (no pair is owed twice);
+    /// any other contents are [`Refusal::Mismatch`]. Held means live right now:
+    /// a matched and drained record is still held, a retired one is not.
+    ///
+    /// A record that is not held is late when its timestamp is at or below
+    /// its own side's watermark, and on no other count: the opposite
+    /// watermark never refuses a record, so one whose partner is still held
+    /// is always admitted and paired, however far the two watermarks have
+    /// drifted apart. A record replayed after it was retired is
+    /// [`Refusal::Late`] for good, because [`retire`](Self::retire) lets a
+    /// record go only once its own watermark has reached it.
+    ///
     /// # Errors
+    /// [`Refusal::Mismatch`] for a held identity with other contents,
     /// [`Refusal::Pending`] while earlier pairs are undrained, [`Refusal::Late`]
-    /// at or below the side's watermark, [`Refusal::Duplicate`] for a live
-    /// identity, [`Refusal::Full`] without a free slot. Nothing changes.
-    pub fn insert(&mut self, side: Side, record: Record) -> Result<(), Refusal> {
+    /// at or below the side's own watermark, [`Refusal::Full`] without a free
+    /// slot. Nothing changes.
+    pub fn insert(&mut self, side: Side, record: Record) -> Result<Inserting, Refusal> {
+        if let Some(held) = self.held(side, record.id) {
+            return if held == record {
+                Ok(Inserting::Duplicate)
+            } else {
+                Err(Refusal::Mismatch)
+            };
+        }
         if self.probe.is_some() {
             return Err(Refusal::Pending);
         }
-        if self
-            .watermark(side)
-            .is_some_and(|value| record.timestamp <= value)
-        {
+        if self.passed(side, record.timestamp) {
             return Err(Refusal::Late);
-        }
-        if self.contains(side, record.id) {
-            return Err(Refusal::Duplicate);
         }
         let slot = self
             .slots(side)
@@ -260,7 +280,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
             record,
             cursor: 0,
         });
-        Ok(())
+        Ok(Inserting::Accepted)
     }
 
     /// Whether at least one pair from the last insert is still owed.
@@ -335,18 +355,20 @@ impl<const L: usize, const R: usize> Join<L, R> {
     /// # Errors
     /// [`Refusal::WatermarkRegressed`] when `value` is behind the side's
     /// watermark. Nothing changes.
-    pub fn advance_watermark(&mut self, side: Side, value: u64) -> Result<Advancing, Refusal> {
-        if self.watermark(side) == Some(value) {
-            return Ok(Advancing::Repeated);
-        }
-        let advanced = match side {
+    pub const fn advance_watermark(
+        &mut self,
+        side: Side,
+        value: u64,
+    ) -> Result<Advancing, Refusal> {
+        // The sibling answers all three cases itself and changes nothing on a
+        // repeat or a refusal.
+        let outcome = match side {
             Side::Left => self.left_watermark.advance(value),
             Side::Right => self.right_watermark.advance(value),
         };
-        if advanced {
-            Ok(Advancing::Advanced)
-        } else {
-            Err(Refusal::WatermarkRegressed)
+        match outcome {
+            Ok(advancing) => Ok(advancing),
+            Err(refusal) => Err(regressed(refusal)),
         }
     }
 
@@ -361,7 +383,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
     /// # Errors
     /// [`Refusal::WatermarkRegressed`] when `source` is behind the side: its
     /// value is lower, or it has none while the side holds one. Nothing changes.
-    pub fn advance_watermark_from(
+    pub const fn advance_watermark_from(
         &mut self,
         side: Side,
         source: &Watermark,
@@ -373,7 +395,8 @@ impl<const L: usize, const R: usize> Join<L, R> {
         }
     }
 
-    /// Records the opposite watermark has moved past, removable right now.
+    /// Held records [`retire`](Self::retire) would remove right now: those
+    /// both watermarks have finished.
     #[must_use]
     pub fn retirable(&self) -> usize {
         [Side::Left, Side::Right]
@@ -382,14 +405,22 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 self.slots(side)
                     .iter()
                     .flatten()
-                    .filter(|held| self.expired(side, **held))
+                    .filter(|held| self.finished(side, held.timestamp))
                     .count()
             })
             .sum()
     }
 
-    /// Remove records no future opposite record can match; returns how many.
+    /// Remove the records both watermarks have finished; returns how many.
     ///
+    /// A held record is finished when both hold: the opposite watermark has
+    /// reached the end of its reach (`timestamp + after` for a left record,
+    /// `timestamp + before` for a right one, saturating at `u64::MAX`), so no
+    /// opposite record [`insert`](Self::insert) would still accept can match
+    /// it; and its own side's watermark has reached its timestamp, so the same
+    /// record offered again is [`Refusal::Late`]. Hence no pair is ever owed
+    /// twice and no record that could still match is dropped. A record whose
+    /// own watermark lags stays held, whatever the opposite one says.
     /// At most `out.len()` records leave per call, left input first; the rest
     /// stay held and [`retirable`](Self::retirable) until a later call.
     ///
@@ -409,7 +440,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 let Some(record) = self.slots(side).get(index).copied().flatten() else {
                     continue;
                 };
-                if !self.expired(side, record) {
+                if !self.finished(side, record.timestamp) {
                     continue;
                 }
                 match side {
@@ -423,6 +454,15 @@ impl<const L: usize, const R: usize> Join<L, R> {
         Ok(written)
     }
 
+    /// The live record on `side` using this identity.
+    fn held(&self, side: Side, id: u64) -> Option<Record> {
+        self.slots(side)
+            .iter()
+            .flatten()
+            .copied()
+            .find(|held| held.id == id)
+    }
+
     const fn slots(&self, side: Side) -> &[Option<Record>] {
         match side {
             Side::Left => &self.left,
@@ -430,12 +470,36 @@ impl<const L: usize, const R: usize> Join<L, R> {
         }
     }
 
-    /// Opposite records at or below their watermark are refused as late, so a
-    /// record is dead once that watermark reaches the end of its reach.
-    fn expired(&self, side: Side, record: Record) -> bool {
-        let last = self.bounds.reach(side, record.timestamp).last;
-        self.watermark(side.other())
-            .is_some_and(|value| value >= last)
+    /// Whether `side`'s own watermark has reached `timestamp`: a record there
+    /// that is not held is [`Refusal::Late`].
+    ///
+    /// The one lateness test. `insert` refuses by it and `finished` requires
+    /// it, so "retired" implies "late on replay" by construction, and for
+    /// good: an honoured advance never lowers a watermark.
+    fn passed(&self, side: Side, timestamp: u64) -> bool {
+        self.watermark(side).is_some_and(|own| timestamp <= own)
+    }
+
+    /// Whether a held `side` record at `timestamp` may be retired. Both hold:
+    ///
+    /// 1. The opposite watermark has reached the end of the record's reach,
+    ///    `other >= reach.last`. An opposite record is accepted only above its
+    ///    own watermark, `u > other >= reach.last`, which is outside the
+    ///    reach, so no future opposite record matches. One short
+    ///    (`other == reach.last - 1`) a record at `reach.last` is still
+    ///    accepted and matches, so the test is exact. A reach that saturates
+    ///    at `u64::MAX` is reached only by `other == u64::MAX`, where no
+    ///    opposite record is accepted at all.
+    /// 2. The record's own watermark has reached it ([`passed`](Self::passed)),
+    ///    so the same record offered again is `Late`.
+    ///
+    /// The one retirement test, used by `retire` and `retirable`.
+    fn finished(&self, side: Side, timestamp: u64) -> bool {
+        let last = self.bounds.reach(side, timestamp).last;
+        let unmatchable = self
+            .watermark(side.other())
+            .is_some_and(|other| other >= last);
+        unmatchable && self.passed(side, timestamp)
     }
 
     /// Move the cursor to the next matching opposite slot, or finish.
@@ -451,6 +515,20 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 })
             })
             .map(|(cursor, _)| Probe { cursor, ..probe })
+    }
+}
+
+/// The join's name for a refusal of a side's [`Watermark`].
+const fn regressed(refusal: window_machines::Refusal) -> Refusal {
+    match refusal {
+        window_machines::Refusal::Regressed
+        // Answered by the sibling's windows and sessions, never by
+        // `Watermark::advance`. Listed, not wildcarded, so a variant added
+        // there stops compiling here.
+        | window_machines::Refusal::Overflow
+        | window_machines::Refusal::Undersized
+        | window_machines::Refusal::Late
+        | window_machines::Refusal::Full => Refusal::WatermarkRegressed,
     }
 }
 
