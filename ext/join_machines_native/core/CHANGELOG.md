@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/join_machines/compare/join-machines-v0.4.0...join-machines-v0.5.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* converted to the fleet conventions. One exhaustive Refusal per crate, Result from every operation that can refuse, a refusal changes nothing, provable idempotent repeats are honoured, Ruby mirrors the core. No compatibility aliases. Requires window-machines >= 0.3 and re-exports its Advancing. Refusal::Duplicate is gone; a retired record is Late on replay.
+
+### Features
+
+* honour identical re-inserts as Duplicate, refuse changed ones as Mismatch, retire only when both watermarks have passed ([e06e9fe](https://github.com/seuros/join_machines/commit/e06e9fe31e3e93b80dd1fa99bfb5bc60839b2bd2))
+
 ## [0.4.0](https://github.com/seuros/join_machines/compare/join-machines-v0.3.0...join-machines-v0.4.0) (2026-11-13)
 
 
