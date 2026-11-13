@@ -100,8 +100,14 @@ fn full_output_buffer_resumes_without_losing_or_repeating_pairs() {
     seen.extend_from_slice(&buffer);
     assert_eq!(join.pending_pairs(), 2);
     // Watermarks may move while pairs are owed; nothing is removed by that.
-    assert!(join.advance_watermark(Side::Left, 1_000));
-    assert!(join.advance_watermark(Side::Right, 1_000));
+    assert_eq!(
+        join.advance_watermark(Side::Left, 1_000),
+        Ok(Advancing::Advanced)
+    );
+    assert_eq!(
+        join.advance_watermark(Side::Right, 1_000),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.retire(&mut [GONE; 4]), Err(Refusal::Pending));
     assert_eq!(join.drain(&mut buffer), 2);
     seen.extend_from_slice(&buffer[..2]);
@@ -128,10 +134,23 @@ fn capacity_full_duplicate_and_late_are_refusals_without_mutation() {
     let before = join.clone();
     assert_eq!(join.insert(Side::Left, rec(3, 0, 7)), Err(Refusal::Full));
     assert_eq!(join.insert(Side::Right, rec(2, 0, 7)), Err(Refusal::Full));
-    assert!(join.advance_watermark(Side::Left, 6));
+    assert_eq!(
+        join.advance_watermark(Side::Left, 6),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.insert(Side::Left, rec(3, 0, 6)), Err(Refusal::Late));
     assert_eq!(join.insert(Side::Left, rec(3, 0, 0)), Err(Refusal::Late));
-    assert!(join.advance_watermark(Side::Left, 5).eq(&false));
+    let held = join.clone();
+    assert_eq!(
+        join.advance_watermark(Side::Left, 5),
+        Err(Refusal::WatermarkRegressed)
+    );
+    assert_eq!(join, held);
+    assert_eq!(
+        join.advance_watermark(Side::Left, 6),
+        Ok(Advancing::Repeated)
+    );
+    assert_eq!(join, held);
     assert_eq!(join.watermark(Side::Left), Some(6));
     assert_eq!(join.watermark(Side::Right), None);
     assert_eq!((join.len(Side::Left), join.len(Side::Right)), (2, 1));
@@ -155,9 +174,15 @@ fn retirement_follows_the_opposite_watermark_and_is_resumable() {
     assert_eq!(join.retirable(), 0);
     assert_eq!(join.retire(&mut [GONE; 4]), Ok(0));
     // Left 10 reaches right times 8..=15; right watermark 14 keeps it alive.
-    assert!(join.advance_watermark(Side::Right, 14));
+    assert_eq!(
+        join.advance_watermark(Side::Right, 14),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.retirable(), 0);
-    assert!(join.advance_watermark(Side::Right, 16));
+    assert_eq!(
+        join.advance_watermark(Side::Right, 16),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.retirable(), 2);
     assert_eq!(join.retire(&mut []), Ok(0));
     let mut out = [GONE; 1];
@@ -175,9 +200,15 @@ fn retirement_follows_the_opposite_watermark_and_is_resumable() {
     assert_eq!(join.retire(&mut out), Ok(0));
     assert_eq!(join.len(Side::Left), 1);
     // Right 10 reaches left times 5..=12; the left watermark retires it.
-    assert!(join.advance_watermark(Side::Left, 11));
+    assert_eq!(
+        join.advance_watermark(Side::Left, 11),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.retirable(), 0);
-    assert!(join.advance_watermark(Side::Left, 12));
+    assert_eq!(
+        join.advance_watermark(Side::Left, 12),
+        Ok(Advancing::Advanced)
+    );
     assert_eq!(join.retire(&mut out), Ok(1));
     assert_eq!(
         out[0],
@@ -227,7 +258,10 @@ fn u64_limits_saturate_exactly() {
             right: max
         }]
     );
-    assert!(join.advance_watermark(Side::Right, max - 1));
+    assert_eq!(
+        join.advance_watermark(Side::Right, max - 1),
+        Ok(Advancing::Advanced)
+    );
     let mut out = [GONE; 4];
     assert_eq!(join.retire(&mut out), Ok(1));
     assert_eq!(out[0].record.timestamp, 0);
@@ -235,182 +269,22 @@ fn u64_limits_saturate_exactly() {
     assert_eq!(join.pending_pairs(), 1);
     assert_eq!(drain_all(&mut join, 1).len(), 1);
     // Only the last representable watermark ends a record at the domain edge.
-    assert!(join.advance_watermark(Side::Right, max));
-    assert!(join.advance_watermark(Side::Left, max));
-    assert!(!join.advance_watermark(Side::Left, max - 1));
+    assert_eq!(
+        join.advance_watermark(Side::Right, max),
+        Ok(Advancing::Advanced)
+    );
+    assert_eq!(
+        join.advance_watermark(Side::Left, max),
+        Ok(Advancing::Advanced)
+    );
+    assert_eq!(
+        join.advance_watermark(Side::Left, max - 1),
+        Err(Refusal::WatermarkRegressed)
+    );
     assert_eq!(join.insert(Side::Left, rec(9, 0, max)), Err(Refusal::Late));
     assert_eq!(join.retire(&mut out), Ok(3));
     assert!(join.is_empty());
 }
 
-struct Draws(u64);
-impl Draws {
-    const fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    const fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-}
-
-/// Naive model: remembers every accepted record forever and compares with
-/// wide signed arithmetic, so it shares no reach or retirement logic.
-#[derive(Default)]
-struct Model {
-    seen: [Vec<(Record, bool)>; 2],
-    watermark: [Option<u64>; 2],
-    owed: Vec<Pair>,
-}
-impl Model {
-    fn matches(before: u64, after: u64, left: Record, right: Record) -> bool {
-        let delta = i128::from(right.timestamp) - i128::from(left.timestamp);
-        left.key == right.key && delta >= -i128::from(before) && delta <= i128::from(after)
-    }
-    fn live(&self, side: usize) -> usize {
-        self.seen[side].iter().filter(|(_, live)| *live).count()
-    }
-    /// Dead when no admissible (above-watermark, representable) opposite
-    /// timestamp is still within the record's bounds.
-    fn dead(&self, before: u64, after: u64, side: usize, record: Record) -> bool {
-        let ahead = if side == 0 { after } else { before };
-        let last = (i128::from(record.timestamp) + i128::from(ahead)).min(i128::from(u64::MAX));
-        self.watermark[1 - side].is_some_and(|mark| i128::from(mark) >= last)
-    }
-}
-
-const SIDES: [Side; 2] = [Side::Left, Side::Right];
-
-#[allow(clippy::too_many_lines)]
-fn run_model(seed: u64, before: u64, after: u64, base: u64) {
-    const L: usize = 5;
-    const R: usize = 7;
-    let caps = [L, R];
-    let mut draws = Draws(seed);
-    let mut join = Join::<L, R>::new(Bounds::new(before, after));
-    let mut model = Model::default();
-    let mut clock = [base; 2];
-    for _ in 0..4_000 {
-        match draws.below(10) {
-            0..=4 => {
-                let side = usize::try_from(draws.below(2)).unwrap();
-                let jitter = draws.below(12);
-                let timestamp = (clock[side].saturating_sub(4)).saturating_add(jitter);
-                let record = rec(draws.below(24), draws.below(3), timestamp);
-                let expected = if !model.owed.is_empty() {
-                    Err(Refusal::Pending)
-                } else if model.watermark[side].is_some_and(|mark| timestamp <= mark) {
-                    Err(Refusal::Late)
-                } else if model.seen[side]
-                    .iter()
-                    .any(|(held, live)| *live && held.id == record.id)
-                {
-                    Err(Refusal::Duplicate)
-                } else if model.live(side) == caps[side] {
-                    Err(Refusal::Full)
-                } else {
-                    Ok(())
-                };
-                let snapshot = join.clone();
-                assert_eq!(join.insert(SIDES[side], record), expected);
-                if expected.is_err() {
-                    assert_eq!(join, snapshot);
-                    continue;
-                }
-                // Every record ever accepted on the other side, retired or not.
-                for (other, _) in &model.seen[1 - side] {
-                    let (left, right) = if side == 0 {
-                        (record, *other)
-                    } else {
-                        (*other, record)
-                    };
-                    if Model::matches(before, after, left, right) {
-                        model.owed.push(Pair {
-                            key: record.key,
-                            left: left.id,
-                            right: right.id,
-                        });
-                    }
-                }
-                model.seen[side].push((record, true));
-                assert_eq!(join.pending_pairs(), model.owed.len());
-            }
-            5 | 6 => {
-                let mut buffer = [BLANK; 3];
-                let room = usize::try_from(draws.below(4)).unwrap();
-                let written = join.drain(&mut buffer[..room]);
-                assert_eq!(written, room.min(model.owed.len()));
-                for pair in &buffer[..written] {
-                    let index = model.owed.iter().position(|owed| owed == pair);
-                    model
-                        .owed
-                        .swap_remove(index.expect("emitted pair must be owed"));
-                }
-                assert_eq!(join.pending(), !model.owed.is_empty());
-            }
-            7 => {
-                let side = usize::try_from(draws.below(2)).unwrap();
-                let value = (clock[side].saturating_sub(2)).saturating_add(draws.below(6));
-                let ok = model.watermark[side].is_none_or(|mark| value >= mark);
-                let snapshot = join.clone();
-                assert_eq!(join.advance_watermark(SIDES[side], value), ok);
-                if ok {
-                    model.watermark[side] = Some(value);
-                    clock[side] = clock[side].max(value);
-                } else {
-                    assert_eq!(join, snapshot);
-                }
-                assert_eq!(join.watermark(SIDES[side]), model.watermark[side]);
-            }
-            _ => {
-                let mut buffer = [GONE; 3];
-                let room = usize::try_from(draws.below(4)).unwrap();
-                let snapshot = join.clone();
-                let result = join.retire(&mut buffer[..room]);
-                if !model.owed.is_empty() {
-                    assert_eq!(result, Err(Refusal::Pending));
-                    assert_eq!(join, snapshot);
-                    continue;
-                }
-                let due: usize = (0..2)
-                    .map(|side| {
-                        model.seen[side]
-                            .iter()
-                            .filter(|(held, live)| *live && model.dead(before, after, side, *held))
-                            .count()
-                    })
-                    .sum();
-                assert_eq!(snapshot.retirable(), due);
-                assert_eq!(result, Ok(room.min(due)));
-                for gone in &buffer[..room.min(due)] {
-                    let side = usize::from(gone.side == Side::Right);
-                    assert!(model.dead(before, after, side, gone.record));
-                    let entry = model.seen[side]
-                        .iter_mut()
-                        .find(|(held, live)| *live && *held == gone.record)
-                        .expect("retired record must be live");
-                    entry.1 = false;
-                }
-            }
-        }
-        for (index, side) in SIDES.into_iter().enumerate() {
-            assert_eq!(join.len(side), model.live(index));
-        }
-    }
-}
-
-#[test]
-fn randomized_runs_match_the_naive_model() {
-    for seed in 1..=40_u64 {
-        let mut draws = Draws(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let (before, after) = (draws.below(6), draws.below(6));
-        run_model(seed, before, after, 0);
-        run_model(seed + 1_000, before, after, u64::MAX - 40);
-    }
-    run_model(7, u64::MAX, u64::MAX, 0);
-    run_model(8, 0, 0, 0);
-}
-
+mod model;
 mod seam;

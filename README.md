@@ -14,10 +14,10 @@ gem 'join_machines'
 
 ```ruby
 # A click joins an impression of the same ad shown up to 30 s before it.
-join = JoinMachines::Join.new(before: 30_000, after: 0)
+join = JoinMachines::Join.new(JoinMachines::Bounds.new(before: 30_000, after: 0))
 
 def on_record(join, side, record, store)
-  case join.insert(side, record.id, record.ad_id, record.event_ms)
+  case join.insert(side, JoinMachines::Record.new(record.id, record.ad_id, record.event_ms))
   when :late      then return count_late(record)
   when :duplicate then return
   when :full      then raise 'join is full: advance the watermarks and retire'
@@ -32,7 +32,7 @@ end
 def on_watermark(join, side, event_ms, store)
   join.advance_watermark(side, event_ms)
   until (gone = join.retire(100)).empty?
-    gone.each { |r| store[r.side].delete(r.id) }
+    gone.each { |r| store[r.side].delete(r.record.id) }
   end
 end
 ```
@@ -89,13 +89,13 @@ sequenceDiagram
     participant C as Caller
     participant J as Join
 
-    C->>J: insert(:right, 1, key 9, t=8)
+    C->>J: insert(:right, Record(1, key 9, t=8))
     J-->>C: :accepted (nothing to match)
-    C->>J: insert(:right, 2, key 9, t=15)
+    C->>J: insert(:right, Record(2, key 9, t=15))
     J-->>C: :accepted
-    C->>J: insert(:left, 100, key 9, t=10)
+    C->>J: insert(:left, Record(100, key 9, t=10))
     J-->>C: :accepted, 2 pairs owed
-    C->>J: insert(:left, 101, ...)
+    C->>J: insert(:left, Record(101, ...))
     J-->>C: :pending
     C->>J: drain(1)
     J-->>C: [Pair(9, 100, 1)]
@@ -103,7 +103,7 @@ sequenceDiagram
     J-->>C: [Pair(9, 100, 2)]
     C->>J: advance_watermark(:right, 15)
     C->>J: retire(10)
-    J-->>C: [Retired(:left, 100, 9, 10)]
+    J-->>C: [Retired(:left, Record(100, 9, 10))]
 ```
 
 ## How the Join Works
@@ -111,25 +111,31 @@ sequenceDiagram
 ### Bounds
 
 ```ruby
-join = JoinMachines::Join.new(before: 2, after: 5)
-join.before   # => 2
-join.after    # => 5
+bounds = JoinMachines::Bounds.new(before: 2, after: 5)   # or Bounds.new(2, 5)
+join = JoinMachines::Join.new(bounds)
+join.bounds                # => #<data JoinMachines::Bounds before=2, after=5>
+bounds.reach(:left, 10)    # => #<data JoinMachines::Reach first=8, last=15>
+bounds.reach(:right, 10)   # => #<data JoinMachines::Reach first=5, last=12>
+bounds.reach(:left, 10).include?(15)   # => true
+JoinMachines.other(:left)  # => :right
 ```
 
-A left record at time `t` matches right records with the same key at times `t - 2` through `t + 5`, both ends included. `before: 0, after: 0` is an exact-time join. The bounds are fixed for the life of the join.
+A left record at time `t` matches right records with the same key at times `t - 2` through `t + 5`, both ends included. `Bounds.new(0, 0)` is an exact-time join. `Join.new` takes the `Bounds` value, the way the core's constructor does; the bounds are fixed for the life of the join. `reach(side, timestamp)` is the range of opposite-side times a record on `side` can match.
 
 ### Insert
 
 ```ruby
-join.insert(:right, 1, 9, 8)     # => :accepted   (side, id, key, timestamp)
-join.insert(:right, 2, 9, 15)    # => :accepted
-join.insert(:right, 3, 9, 16)    # => :accepted
-join.insert(:left, 100, 9, 10)   # => :accepted
-join.pending?                    # => true
-join.pending_pairs               # => 2
+Record = JoinMachines::Record            # id, key, timestamp
+
+join.insert(:right, Record.new(1, 9, 8))     # => :accepted
+join.insert(:right, Record.new(2, 9, 15))    # => :accepted
+join.insert(:right, Record.new(3, 9, 16))    # => :accepted
+join.insert(:left, Record.new(100, 9, 10))   # => :accepted
+join.pending?                                # => true
+join.pending_pairs                           # => 2
 ```
 
-An accepted record is held, and the join now owes one pair for every held record on the other side with the same key inside the interval. The ids are yours. They only have to be unique among the records currently held on the same side.
+`insert(side, record)` takes a `Record`, the same value `retire` hands back. An accepted record is held, and the join now owes one pair for every held record on the other side with the same key inside the interval. The ids are yours. They only have to be unique among the records currently held on the same side.
 
 ### Drain
 
@@ -144,35 +150,40 @@ join.drain(8)   # => []
 `drain(max)` hands over at most `max` owed pairs. Whatever didn't fit stays owed, in order, and the next call picks up exactly where this one stopped. Every pair comes out once. While pairs are owed, `insert` and `retire` answer `:pending`:
 
 ```ruby
-join.insert(:left, 101, 9, 14)   # => :accepted, owes pairs with 2 and 3
-join.insert(:left, 102, 9, 14)   # => :pending
-join.drain(8).size               # => 2
+join.insert(:left, Record.new(101, 9, 14))   # => :accepted, owes pairs with 2 and 3
+join.insert(:left, Record.new(102, 9, 14))   # => :pending
+join.drain(8).size                           # => 2
 ```
 
 ### Watermarks
 
 ```ruby
-join.advance_watermark(:right, 14)   # => true
-join.advance_watermark(:right, 13)   # => false, time went backwards
-join.watermark(:right)               # => 14
-join.watermark(:left)                # => nil
-join.insert(:right, 4, 9, 14)        # => :late
-join.insert(:right, 4, 9, 15)        # => :accepted
+join.advance_watermark(:right, 14)            # => :advanced
+join.advance_watermark(:right, 14)            # => :repeated, already there, nothing changed
+join.advance_watermark(:right, 13)            # => :watermark_regressed, time went backwards
+join.watermark(:right)                        # => 14
+join.watermark(:left)                         # => nil
+join.insert(:right, Record.new(4, 9, 14))     # => :late
+join.insert(:right, Record.new(4, 9, 15))     # => :accepted
 join.drain(8)
 ```
 
-Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. Advancing a watermark removes nothing by itself.
+Each side has its own watermark: your promise that no more records at or below that time will arrive on that side. The join holds you to it. A record at or below its own side's watermark is `:late` and is not held. Advancing a watermark removes nothing by itself. Repeating the value a side already holds is not a refusal: the promise you are making already stands, so the answer is `:repeated`. Only a value behind the side's watermark is refused, with `:watermark_regressed`.
 
 If you already track a stream's progress in a watermark object, hand it over instead of unwrapping it:
 
 ```ruby
 clicks = WindowMachines::Watermark.new   # from the window_machines gem, if you use it
 clicks.advance(14)
-join.advance_watermark_from(:right, clicks)   # => true, the side already agrees
+join.advance_watermark_from(:right, clicks)   # => :repeated, the side already agrees
 join.watermark(:right)                        # => 14
+join.side_watermark(:right)                   # => #<data JoinMachines::Watermark value=14>
+join.side_watermark(:left)                    # => #<data JoinMachines::Watermark value=nil>
 ```
 
-`advance_watermark_from(side, watermark)` reads `watermark.value` and answers like `advance_watermark`: `true` when the side now equals it, `false` and no change when it is behind. Any object with a `value` reader returning an Integer or `nil` works; this gem does not depend on `window_machines`. A `nil` value means nothing was observed yet: `true` and nothing to do while the side is `nil` too, `false` once the side has a value. An object without `value` raises `TypeError`.
+`advance_watermark_from(side, watermark)` reads `watermark.value` and answers like `advance_watermark`: `:advanced` when the side moved up to it, `:repeated` when the side already equals it, `:watermark_regressed` and no change when it is behind. Any object with a `value` reader returning an Integer or `nil` works; this gem does not depend on `window_machines`. A `nil` value means nothing was observed yet: `:repeated` while the side is `nil` too, `:watermark_regressed` once the side has a value. An object without `value` raises `TypeError`.
+
+`side_watermark(side)` is the other direction: the side's progress as a `JoinMachines::Watermark`, a frozen `Data` with the one reader `value` (an Integer, or `nil` before the first watermark). That is exactly the shape `advance_watermark_from` reads, so one join's side can be handed to another join. It is a copy taken at the call, not a live view, and it does not advance; `watermark(side)` is the same number without the wrapper.
 
 ### Retire
 
@@ -181,16 +192,18 @@ join.retirable                       # => 0
 join.advance_watermark(:right, 15)   # left 100 reached right times 8..15
 join.retirable                       # => 1
 join.retire(10)
-# => [#<data JoinMachines::Retired side=:left, id=100, key=9, timestamp=10>]
+# => [#<data JoinMachines::Retired side=:left,
+#       record=#<data JoinMachines::Record id=100, key=9, timestamp=10>>]
 ```
 
-A held record is finished when the *other* side's watermark reaches the last time it could match. From then on nothing admissible can pair with it. `retire(max)` removes up to `max` finished records and tells you which, so you can drop their payloads. Anything over `max` stays `retirable` for the next call.
+A held record is finished when the *other* side's watermark reaches the last time it could match. From then on nothing admissible can pair with it. `retire(max)` removes up to `max` finished records and tells you which, so you can drop their payloads: each `Retired` is the `side` and the `Record` (`id`, `key`, `timestamp`) that was held. Anything over `max` stays `retirable` for the next call.
 
 ### Capacity
 
 ```ruby
 JoinMachines::CAPACITY   # => 64
-join.capacity            # => 64
+join.capacity(:left)     # => 64
+join.capacity(:right)    # => 64
 join.size(:left)         # => 1
 ```
 
@@ -199,7 +212,17 @@ Each side holds 64 records. Past that, `insert` says `:full`. A record is never 
 ## The Rules of the Tender
 
 - **Ids, keys, times, bounds, and limits are Integers** in `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. A side that isn't `:left` or `:right` raises `ArgumentError` (or `TypeError` if it isn't a Symbol).
-- **Refusals don't raise.** `:pending`, `:late`, `:duplicate`, `:full`, and `false` are answers, and a refused call changes nothing.
+- **Refusals don't raise.** `:pending`, `:late`, `:duplicate`, `:full` and `:watermark_regressed` are answers, each with its own symbol and no catch-all, and a refused call changes nothing. Only malformed input raises.
+- **Every answer, by method.**
+
+  | Method | Honoured | Refused |
+  | --- | --- | --- |
+  | `insert(side, record)` | `:accepted` | `:pending`, `:late`, `:duplicate`, `:full` |
+  | `drain(max)` | an Array of `Pair`, `[]` when none is owed | never refuses |
+  | `advance_watermark(side, value)` | `:advanced`, or `:repeated` when the side already held `value` | `:watermark_regressed` |
+  | `advance_watermark_from(side, watermark)` | `:advanced`, or `:repeated` when the side already equals it | `:watermark_regressed` |
+  | `retire(max)` | an Array of `Retired`, `[]` when none is retirable | `:pending` |
+- **Arguments are the core's values.** `Join.new` takes a `Bounds`, `insert` takes a `Record`. A Hash, an Array or loose Integers in their place raise `TypeError` or `ArgumentError`.
 - **One record's pairs at a time.** Drain what the last insert owes before inserting or retiring.
 - **Late is judged by a record's own side. Retirement is judged by the other side.** That asymmetry is what makes it safe: a record that is not late always finds every partner it should still held.
 - **Time saturates at the edges.** A reach that would run below 0 or past `2**64-1` stops there.

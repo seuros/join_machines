@@ -3,32 +3,38 @@
 require_relative 'join_machines/version'
 
 module JoinMachines
-  # A matched pair of record ids sharing a join key.
-  Pair = Data.define(:key, :left, :right)
-  # A record the join dropped; its payload can be released.
-  Retired = Data.define(:side, :id, :key, :timestamp)
-end
+  # Inclusive range of opposite-side event times a record can match.
+  Reach = Data.define(:first, :last) do
+    # Whether an opposite-side timestamp is inside the range (the core's `contains`).
+    def include?(timestamp)
+      raise TypeError, 'expected an Integer (unsigned 64-bit)' unless timestamp.is_a?(Integer)
 
-# Native is required: no algorithm fallback.
-require 'join_machines_native/join_machines_native'
-
-module JoinMachines
-  # Operations layered over the native join.
-  class Join
-    # Advance one side from a watermark object the caller owns: anything that
-    # answers +value+ with an Integer or nil, such as WindowMachines::Watermark.
-    # Returns true exactly when the side now equals that value; a regression
-    # returns false and changes nothing. A nil value (nothing observed yet) is
-    # an accepted no-op while the side is nil too, and a refused regression
-    # once the side holds a value.
-    def advance_watermark_from(side, watermark)
-      raise TypeError, 'watermark must respond to #value' unless watermark.respond_to?(:value)
-
-      value = watermark.value
-      return advance_watermark(side, value) unless value.nil?
-      raise FrozenError, "can't modify frozen #{self.class}: #{inspect}" if frozen?
-
-      watermark(side).nil?
+      first <= timestamp && timestamp <= last
     end
   end
+
+  # Interval bounds: a pair matches when `left - before <= right <= left + after`
+  # in event time. `reach` is native.
+  Bounds = Data.define(:before, :after) do
+    # Opposite-side timestamps reachable from a record on `side`, saturating
+    # at the edges of 0..2**64-1.
+    def reach(side, timestamp) = Reach.new(*native_reach(side, timestamp))
+  end
+
+  # A matched pair of record ids sharing a join key.
+  Pair = Data.define(:key, :left, :right)
+  # Join metadata for one externally stored record.
+  Record = Data.define(:id, :key, :timestamp)
+  # A record the join dropped; its payload can be released.
+  Retired = Data.define(:side, :record)
+
+  # One input's event-time progress, as `Join#side_watermark` answers it: a
+  # frozen copy whose `value` is an Integer, or nil before the first watermark.
+  # It reads the way `Join#advance_watermark_from` expects, so it can be handed
+  # to another join; it does not advance.
+  Watermark = Data.define(:value)
 end
+
+# Native is required: no algorithm fallback. It builds the Data values above
+# and adds `Bounds#reach`, so they must exist first.
+require 'join_machines_native/join_machines_native'

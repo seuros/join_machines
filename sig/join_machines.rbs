@@ -1,8 +1,38 @@
 module JoinMachines
   VERSION: String
+  # Live records each input holds.
   CAPACITY: Integer
 
   type side = :left | :right
+
+  # Refusals: the call was not honoured and changed nothing. Every reason has
+  # its own symbol; there is no catch-all.
+  type refusal = :pending | :late | :duplicate | :full | :watermark_regressed
+
+  # The core's `Advancing`: what an accepted watermark did.
+  type advancing = :advanced | :repeated
+
+  # The core's `Side::other`: the opposite input.
+  def self.other: (side) -> side
+
+  # Mirrors the core's `Reach`.
+  class Reach < Data
+    attr_reader first: Integer
+    attr_reader last: Integer
+    def self.new: (Integer first, Integer last) -> Reach
+                | (first: Integer, last: Integer) -> Reach
+    # The core's `contains`.
+    def include?: (Integer timestamp) -> bool
+  end
+
+  # Mirrors the core's `Bounds`.
+  class Bounds < Data
+    attr_reader before: Integer
+    attr_reader after: Integer
+    def self.new: (Integer before, Integer after) -> Bounds
+                | (before: Integer, after: Integer) -> Bounds
+    def reach: (side, Integer timestamp) -> Reach
+  end
 
   class Pair < Data
     attr_reader key: Integer
@@ -12,13 +42,21 @@ module JoinMachines
                 | (key: Integer, left: Integer, right: Integer) -> Pair
   end
 
-  class Retired < Data
-    attr_reader side: side
+  # Mirrors the core's `Record`.
+  class Record < Data
     attr_reader id: Integer
     attr_reader key: Integer
     attr_reader timestamp: Integer
-    def self.new: (side side, Integer id, Integer key, Integer timestamp) -> Retired
-                | (side: side, id: Integer, key: Integer, timestamp: Integer) -> Retired
+    def self.new: (Integer id, Integer key, Integer timestamp) -> Record
+                | (id: Integer, key: Integer, timestamp: Integer) -> Record
+  end
+
+  # Mirrors the core's `Retired`.
+  class Retired < Data
+    attr_reader side: side
+    attr_reader record: Record
+    def self.new: (side side, Record record) -> Retired
+                | (side: side, record: Record) -> Retired
   end
 
   # Anything that reads like WindowMachines::Watermark.
@@ -26,22 +64,43 @@ module JoinMachines
     def value: () -> Integer?
   end
 
+  # What `Join#side_watermark` answers: a frozen copy of one input's progress.
+  # `value` is nil before the first watermark. It satisfies `_Watermark`.
+  class Watermark < Data
+    attr_reader value: Integer?
+    def self.new: (Integer? value) -> Watermark
+                | (value: Integer?) -> Watermark
+  end
+
   class Join
-    def self.new: (before: Integer, after: Integer) -> Join
-    def before: () -> Integer
-    def after: () -> Integer
-    def capacity: () -> Integer
+    def self.new: (Bounds bounds) -> Join
+    def bounds: () -> Bounds
+    def capacity: (side) -> Integer
+    # Live records held for one input (the core's `len`).
     def size: (side) -> Integer
     def empty?: () -> bool
+    # The core's `contains`.
     def include?: (side, Integer id) -> bool
-    def insert: (side, Integer id, Integer key, Integer timestamp) -> (:accepted | :pending | :late | :duplicate | :full)
+    # Honoured: :accepted. Refused: :pending, :late, :duplicate, :full.
+    def insert: (side, Record record) -> (:accepted | :pending | :late | :duplicate | :full)
     def pending?: () -> bool
     def pending_pairs: () -> Integer
+    # At most `max` owed pairs, [] when none is owed. Never refuses.
     def drain: (Integer max) -> Array[Pair]
-    def advance_watermark: (side, Integer value) -> bool
-    def advance_watermark_from: (side, _Watermark watermark) -> bool
+    # Honoured: :advanced, and :repeated when the side already held exactly
+    # `value` (nothing changes). Refused: :watermark_regressed.
+    def advance_watermark: (side, Integer value) -> (advancing | :watermark_regressed)
+    # Reads `watermark.value`. Honoured: :advanced, and :repeated when the side
+    # already equals it, a nil value against a side with no watermark
+    # included. Refused: :watermark_regressed, a nil value against a side that
+    # holds one included.
+    def advance_watermark_from: (side, _Watermark watermark) -> (advancing | :watermark_regressed)
+    # The side's watermark as an Integer, nil before the first.
     def watermark: (side) -> Integer?
+    # The same state as a Watermark value, never nil itself.
+    def side_watermark: (side) -> Watermark
     def retirable: () -> Integer
+    # Honoured: the retired records, [] when none is retirable. Refused: :pending.
     def retire: (Integer max) -> (Array[Retired] | :pending)
   end
 end

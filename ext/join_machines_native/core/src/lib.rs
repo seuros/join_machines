@@ -3,6 +3,10 @@
 /// Per-input event-time progress, the sibling type this join is built on.
 pub use window_machines::Watermark;
 
+mod refusal;
+
+pub use refusal::Refusal;
+
 /// One of the two join inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -128,18 +132,14 @@ impl Default for Retired {
     }
 }
 
-/// Why a call changed nothing.
+/// What an accepted watermark did. Both are honoured; neither is a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Refusal {
-    /// Pairs from the previous insert are still owed; drain them first.
-    Pending,
-    /// The timestamp is at or below its own side's watermark.
-    Late,
-    /// A live record on that side already uses this identity.
-    Duplicate,
-    /// That side has no free slot; advance watermarks and retire.
-    Full,
+pub enum Advancing {
+    /// The side moved forward to the value given.
+    Advanced,
+    /// The side already stood exactly there: an idempotent repeat that
+    /// changed nothing.
+    Repeated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,29 +327,49 @@ impl<const L: usize, const R: usize> Join<L, R> {
 
     /// Advance or repeat one input's event-time progress.
     ///
-    /// Returns `false` and changes nothing when `value` regresses. Advancing
-    /// never removes records; call [`retire`](Self::retire) for that.
-    #[must_use]
-    pub fn advance_watermark(&mut self, side: Side, value: u64) -> bool {
-        match side {
+    /// [`Advancing::Advanced`] when the side moved forward (or took its first
+    /// value). Repeating the value the side already holds is the effect asked
+    /// for already holding: [`Advancing::Repeated`], and nothing changes.
+    /// Advancing never removes records; call [`retire`](Self::retire) for that.
+    ///
+    /// # Errors
+    /// [`Refusal::WatermarkRegressed`] when `value` is behind the side's
+    /// watermark. Nothing changes.
+    pub fn advance_watermark(&mut self, side: Side, value: u64) -> Result<Advancing, Refusal> {
+        if self.watermark(side) == Some(value) {
+            return Ok(Advancing::Repeated);
+        }
+        let advanced = match side {
             Side::Left => self.left_watermark.advance(value),
             Side::Right => self.right_watermark.advance(value),
+        };
+        if advanced {
+            Ok(Advancing::Advanced)
+        } else {
+            Err(Refusal::WatermarkRegressed)
         }
     }
 
     /// Advance or repeat one input's progress from a caller-owned [`Watermark`].
     ///
-    /// Returns `true` exactly when the side now equals `source`. A `source`
-    /// with a value behaves as [`advance_watermark`](Self::advance_watermark)
-    /// with that value: a regression returns `false` and changes nothing. A
-    /// `source` with no value yet has nothing to report: it is an accepted
-    /// no-op while the side is uninitialized too, and refused as a regression
-    /// once the side holds a value. It never clears a side.
-    #[must_use]
-    pub fn advance_watermark_from(&mut self, side: Side, source: &Watermark) -> bool {
-        match source.value() {
-            Some(value) => self.advance_watermark(side, value),
-            None => self.watermark(side).is_none(),
+    /// Honoured exactly when the side then equals `source`. A `source` with a
+    /// value behaves as [`advance_watermark`](Self::advance_watermark) with
+    /// that value. A `source` with no value yet has nothing to report: while
+    /// the side is uninitialized too they already agree, which is
+    /// [`Advancing::Repeated`]. It never clears a side.
+    ///
+    /// # Errors
+    /// [`Refusal::WatermarkRegressed`] when `source` is behind the side: its
+    /// value is lower, or it has none while the side holds one. Nothing changes.
+    pub fn advance_watermark_from(
+        &mut self,
+        side: Side,
+        source: &Watermark,
+    ) -> Result<Advancing, Refusal> {
+        match (source.value(), self.watermark(side)) {
+            (Some(value), Some(_) | None) => self.advance_watermark(side, value),
+            (None, None) => Ok(Advancing::Repeated),
+            (None, Some(_)) => Err(Refusal::WatermarkRegressed),
         }
     }
 
