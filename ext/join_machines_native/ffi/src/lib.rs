@@ -139,26 +139,35 @@ fn reach_contains(ruby: &Ruby, this: Value, timestamp: Value) -> Result<bool, Er
     Ok(checked_reach(ruby, first, last)?.contains(timestamp))
 }
 
-/// Ruby symbol name of a refusal: the snake case of the core variant.
-const fn refusal(refused: Refusal) -> &'static str {
-    match refused {
-        Refusal::Mismatch => "mismatch",
-        Refusal::Pending => "pending",
-        Refusal::Late => "late",
-        Refusal::Full => "full",
-        Refusal::WatermarkRegressed => "watermark_regressed",
+matryona_machines::symbols! {
+    /// The core's refusals, each the snake case of its variant.
+    Refusals for Refusal as "a refusal" {
+        Mismatch => "mismatch",
+        Pending => "pending",
+        Late => "late",
+        Full => "full",
+        WatermarkRegressed => "watermark_regressed",
+    }
+}
+
+matryona_machines::symbols! {
+    /// An honoured watermark advance.
+    Advancings for Advancing as "an advance" {
+        Advanced => "advanced",
+        Repeated => "repeated",
+    }
+}
+
+matryona_machines::symbols! {
+    /// An honoured insert.
+    Insertings for Inserting as "an insert" {
+        Accepted => "accepted",
+        Duplicate => "duplicate",
     }
 }
 
 fn advancing(ruby: &Ruby, outcome: Result<Advancing, Refusal>) -> Symbol {
-    symbol(
-        ruby,
-        match outcome {
-            Ok(Advancing::Advanced) => "advanced",
-            Ok(Advancing::Repeated) => "repeated",
-            Err(refused) => refusal(refused),
-        },
-    )
+    symbol(ruby, outcome.map_or_else(Refusals::name, Advancings::name))
 }
 
 /// `Bounds#reach(side, timestamp)`: the core's `Reach`, as a `Reach`.
@@ -200,11 +209,7 @@ impl Wrapper {
         let outcome = this.core.borrow_mut().insert(input, record);
         Ok(symbol(
             ruby,
-            match outcome {
-                Ok(Inserting::Accepted) => "accepted",
-                Ok(Inserting::Duplicate) => "duplicate",
-                Err(refused) => refusal(refused),
-            },
+            outcome.map_or_else(Refusals::name, Insertings::name),
         ))
     }
 
@@ -334,7 +339,7 @@ impl Wrapper {
             |retired| {
                 let retired = match retired {
                     Ok(retired) => retired,
-                    Err(refused) => return Ok(symbol(ruby, refusal(refused)).as_value()),
+                    Err(refused) => return Ok(Refusals::symbol(ruby, refused).as_value()),
                 };
                 let result = ruby.ary_new_capa(retired.len());
                 for gone in retired {
