@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/join_machines/compare/join_machines/v0.3.0...join_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* seal values, native Bounds#reach, exact-class reads, re-check frozen before keeping
+
+### Features
+
+* seal values, native Bounds#reach, exact-class reads, re-check frozen before keeping ([3432d10](https://github.com/seuros/join_machines/commit/3432d1010e389333e15a2adf9dd702f0f7adf64d))
+
 ## [0.3.0](https://github.com/seuros/join_machines/compare/join_machines/v0.2.0...join_machines/v0.3.0) (2026-11-13)
 
 
