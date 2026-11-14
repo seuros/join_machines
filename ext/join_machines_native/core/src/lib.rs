@@ -40,15 +40,37 @@ pub struct Record {
     pub timestamp: u64,
 }
 
-/// Inclusive range of opposite-side event times a record can match.
+/// Inclusive range of opposite-side event times a record can match, never
+/// empty: `first <= last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reach {
-    /// Earliest matching timestamp.
-    pub first: u64,
-    /// Latest matching timestamp.
-    pub last: u64,
+    first: u64,
+    last: u64,
 }
 impl Reach {
+    /// The range from `first` to `last` inclusive, or `None` unless
+    /// `first <= last`: a range holding no timestamp is not a reach.
+    #[must_use]
+    pub const fn new(first: u64, last: u64) -> Option<Self> {
+        if first <= last {
+            Some(Self { first, last })
+        } else {
+            None
+        }
+    }
+
+    /// Earliest matching timestamp.
+    #[must_use]
+    pub const fn first(self) -> u64 {
+        self.first
+    }
+
+    /// Latest matching timestamp.
+    #[must_use]
+    pub const fn last(self) -> u64 {
+        self.last
+    }
+
     /// Whether an opposite-side timestamp is inside the range.
     #[must_use]
     pub const fn contains(self, timestamp: u64) -> bool {
@@ -89,6 +111,7 @@ impl Bounds {
             Side::Left => (self.before, self.after),
             Side::Right => (self.after, self.before),
         };
+        // Saturating either way keeps `first <= timestamp <= last`.
         Reach {
             first: timestamp.saturating_sub(back),
             last: timestamp.saturating_add(ahead),
@@ -145,11 +168,15 @@ pub enum Inserting {
     Duplicate,
 }
 
+/// The pair owed next: `record` on `side` against `other`, the held opposite
+/// record in slot `cursor`. It carries `other` so draining never looks the
+/// slot up again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Probe {
     side: Side,
     record: Record,
     cursor: usize,
+    other: Record,
 }
 
 /// Bounded two-input interval join over record metadata.
@@ -197,7 +224,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
     /// Live records currently held for one input.
     #[must_use]
     pub fn len(&self, side: Side) -> usize {
-        self.slots(side).iter().flatten().count()
+        self.records(side).count()
     }
 
     /// Whether neither input holds a record.
@@ -271,15 +298,8 @@ impl<const L: usize, const R: usize> Join<L, R> {
             .iter()
             .position(Option::is_none)
             .ok_or(Refusal::Full)?;
-        match side {
-            Side::Left => self.left[slot] = Some(record),
-            Side::Right => self.right[slot] = Some(record),
-        }
-        self.probe = self.settle(Probe {
-            side,
-            record,
-            cursor: 0,
-        });
+        self.slots_mut(side)[slot] = Some(record);
+        self.probe = self.settle(side, record, 0);
         Ok(Inserting::Accepted)
     }
 
@@ -296,10 +316,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
         let mut probe = self.probe;
         while let Some(current) = probe {
             count += 1;
-            probe = self.settle(Probe {
-                cursor: current.cursor + 1,
-                ..current
-            });
+            probe = self.next(current);
         }
         count
     }
@@ -314,16 +331,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
             let Some(probe) = self.probe else {
                 break;
             };
-            let Some(other) = self
-                .slots(probe.side.other())
-                .get(probe.cursor)
-                .copied()
-                .flatten()
-            else {
-                // Unreachable: a settled cursor always names a matching slot.
-                self.probe = None;
-                break;
-            };
+            let other = probe.other;
             *slot = match probe.side {
                 Side::Left => Pair {
                     key: probe.record.key,
@@ -337,10 +345,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 },
             };
             written += 1;
-            self.probe = self.settle(Probe {
-                cursor: probe.cursor + 1,
-                ..probe
-            });
+            self.probe = self.next(probe);
         }
         written
     }
@@ -360,16 +365,18 @@ impl<const L: usize, const R: usize> Join<L, R> {
         side: Side,
         value: u64,
     ) -> Result<Advancing, Refusal> {
-        // The sibling answers all three cases itself and changes nothing on a
-        // repeat or a refusal.
-        let outcome = match side {
-            Side::Left => self.left_watermark.advance(value),
-            Side::Right => self.right_watermark.advance(value),
+        // Asks the sibling where the side stands, then acts: the sibling's
+        // `advance` would answer refusals only its windows and sessions give.
+        let advancing = match self.watermark(side) {
+            Some(held) if value < held => return Err(Refusal::WatermarkRegressed),
+            Some(held) if value == held => return Ok(Advancing::Repeated),
+            Some(_) | None => Advancing::Advanced,
         };
-        match outcome {
-            Ok(advancing) => Ok(advancing),
-            Err(refusal) => Err(regressed(refusal)),
+        match side {
+            Side::Left => self.left_watermark = Watermark::at(value),
+            Side::Right => self.right_watermark = Watermark::at(value),
         }
+        Ok(advancing)
     }
 
     /// Advance or repeat one input's progress from a caller-owned [`Watermark`].
@@ -402,9 +409,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
         [Side::Left, Side::Right]
             .into_iter()
             .map(|side| {
-                self.slots(side)
-                    .iter()
-                    .flatten()
+                self.records(side)
                     .filter(|held| self.finished(side, held.timestamp))
                     .count()
             })
@@ -443,10 +448,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 if !self.finished(side, record.timestamp) {
                     continue;
                 }
-                match side {
-                    Side::Left => self.left[index] = None,
-                    Side::Right => self.right[index] = None,
-                }
+                self.slots_mut(side)[index] = None;
                 *slot = Retired { side, record };
                 written += 1;
             }
@@ -456,17 +458,25 @@ impl<const L: usize, const R: usize> Join<L, R> {
 
     /// The live record on `side` using this identity.
     fn held(&self, side: Side, id: u64) -> Option<Record> {
-        self.slots(side)
-            .iter()
-            .flatten()
-            .copied()
-            .find(|held| held.id == id)
+        self.records(side).copied().find(|held| held.id == id)
+    }
+
+    /// The live records on `side`, in slot order.
+    fn records(&self, side: Side) -> impl Iterator<Item = &Record> {
+        self.slots(side).iter().flatten()
     }
 
     const fn slots(&self, side: Side) -> &[Option<Record>] {
         match side {
             Side::Left => &self.left,
             Side::Right => &self.right,
+        }
+    }
+
+    const fn slots_mut(&mut self, side: Side) -> &mut [Option<Record>] {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
         }
     }
 
@@ -502,33 +512,28 @@ impl<const L: usize, const R: usize> Join<L, R> {
         unmatchable && self.passed(side, timestamp)
     }
 
-    /// Move the cursor to the next matching opposite slot, or finish.
-    fn settle(&self, probe: Probe) -> Option<Probe> {
-        let reach = self.bounds.reach(probe.side, probe.record.timestamp);
-        self.slots(probe.side.other())
+    /// The first pair `record` on `side` owes from opposite slot `from` on,
+    /// or `None` when it owes no more.
+    fn settle(&self, side: Side, record: Record, from: usize) -> Option<Probe> {
+        let reach = self.bounds.reach(side, record.timestamp);
+        self.slots(side.other())
             .iter()
             .enumerate()
-            .skip(probe.cursor)
-            .find(|(_, held)| {
-                held.is_some_and(|held| {
-                    held.key == probe.record.key && reach.contains(held.timestamp)
-                })
+            .skip(from)
+            .find_map(|(cursor, held)| {
+                held.filter(|held| held.key == record.key && reach.contains(held.timestamp))
+                    .map(|other| Probe {
+                        side,
+                        record,
+                        cursor,
+                        other,
+                    })
             })
-            .map(|(cursor, _)| Probe { cursor, ..probe })
     }
-}
 
-/// The join's name for a refusal of a side's [`Watermark`].
-const fn regressed(refusal: window_machines::Refusal) -> Refusal {
-    match refusal {
-        window_machines::Refusal::Regressed
-        // Answered by the sibling's windows and sessions, never by
-        // `Watermark::advance`. Listed, not wildcarded, so a variant added
-        // there stops compiling here.
-        | window_machines::Refusal::Overflow
-        | window_machines::Refusal::Undersized
-        | window_machines::Refusal::Late
-        | window_machines::Refusal::Full => Refusal::WatermarkRegressed,
+    /// The pair owed after `probe`.
+    fn next(&self, probe: Probe) -> Option<Probe> {
+        self.settle(probe.side, probe.record, probe.cursor + 1)
     }
 }
 

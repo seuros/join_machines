@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, missing_docs)]
 extern crate std;
 use super::*;
 use std::vec::Vec;
@@ -6,15 +5,9 @@ use std::vec::Vec;
 const fn rec(id: u64, key: u64, timestamp: u64) -> Record {
     Record { id, key, timestamp }
 }
-const BLANK: Pair = Pair {
-    key: 0,
-    left: 0,
-    right: 0,
-};
-const GONE: Retired = Retired {
-    side: Side::Left,
-    record: rec(0, 0, 0),
-};
+const fn pair(key: u64, left: u64, right: u64) -> Pair {
+    Pair { key, left, right }
+}
 const ACCEPTED: Result<Inserting, Refusal> = Ok(Inserting::Accepted);
 const DUPLICATE: Result<Inserting, Refusal> = Ok(Inserting::Duplicate);
 const MISMATCH: Result<Inserting, Refusal> = Err(Refusal::Mismatch);
@@ -26,7 +19,7 @@ fn advance<const L: usize, const R: usize>(join: &mut Join<L, R>, side: Side, va
 
 fn drain_all<const L: usize, const R: usize>(join: &mut Join<L, R>, chunk: usize) -> Vec<Pair> {
     let mut pairs = Vec::new();
-    let mut buffer = [BLANK; 8];
+    let mut buffer = [Pair::default(); 8];
     while join.pending() {
         let written = join.drain(&mut buffer[..chunk]);
         assert!(written > 0, "a pending join must make progress");
@@ -40,73 +33,48 @@ fn drain_all<const L: usize, const R: usize>(join: &mut Join<L, R>, chunk: usize
 fn interval_bounds_are_inclusive_and_asymmetric() {
     let mut join = Join::<8, 8>::new(Bounds::new(2, 5));
     for (id, timestamp) in [(1, 7), (2, 8), (3, 15), (4, 16)] {
-        assert_eq!(
-            join.insert(Side::Right, rec(id, 9, timestamp)),
-            Ok(Inserting::Accepted)
-        );
+        assert_eq!(join.insert(Side::Right, rec(id, 9, timestamp)), ACCEPTED);
         assert!(!join.pending());
     }
-    assert_eq!(
-        join.insert(Side::Right, rec(5, 1, 10)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Left, rec(100, 9, 10)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Right, rec(5, 1, 10)), ACCEPTED);
+    assert_eq!(join.insert(Side::Left, rec(100, 9, 10)), ACCEPTED);
     assert_eq!(join.pending_pairs(), 2);
     let pairs = drain_all(&mut join, 8);
-    let pair = |right| Pair {
-        key: 9,
-        left: 100,
-        right,
-    };
-    assert_eq!(pairs, [pair(2), pair(3)]);
+    assert_eq!(pairs, [pair(9, 100, 2), pair(9, 100, 3)]);
     // The mirrored probe: a right record finds earlier left records.
-    assert_eq!(
-        join.insert(Side::Left, rec(101, 9, 18)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        drain_all(&mut join, 8),
-        [pair(4)].map(|p| Pair { left: 101, ..p })
-    );
-    assert_eq!(
-        join.insert(Side::Right, rec(6, 9, 19)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        drain_all(&mut join, 8),
-        [Pair {
-            key: 9,
-            left: 101,
-            right: 6
-        }]
-    );
+    assert_eq!(join.insert(Side::Left, rec(101, 9, 18)), ACCEPTED);
+    assert_eq!(drain_all(&mut join, 8), [pair(9, 101, 4)]);
+    assert_eq!(join.insert(Side::Right, rec(6, 9, 19)), ACCEPTED);
+    assert_eq!(drain_all(&mut join, 8), [pair(9, 101, 6)]);
     assert_eq!(
         Bounds::new(2, 5).reach(Side::Left, 10),
-        Reach { first: 8, last: 15 }
+        Reach::new(8, 15).expect("8 <= 15")
     );
     assert_eq!(
         Bounds::new(2, 5).reach(Side::Right, 10),
-        Reach { first: 5, last: 12 }
+        Reach::new(5, 12).expect("5 <= 12")
     );
     assert_eq!((join.bounds().before(), join.bounds().after()), (2, 5));
+}
+
+#[test]
+fn a_reach_is_valid_or_does_not_exist() {
+    assert_eq!(Reach::new(5, 3), None);
+    let one = Reach::new(7, 7).expect("7 <= 7");
+    assert_eq!((one.first(), one.last()), (7, 7));
+    assert!(one.contains(7) && !one.contains(6) && !one.contains(8));
+    // `reach` saturates at both edges and stays a valid reach.
+    let edge = Bounds::new(u64::MAX, u64::MAX).reach(Side::Left, 3);
+    assert_eq!(Some(edge), Reach::new(0, u64::MAX));
 }
 
 #[test]
 fn full_output_buffer_resumes_without_losing_or_repeating_pairs() {
     let mut join = Join::<2, 6>::new(Bounds::new(10, 10));
     for id in 0..6 {
-        assert_eq!(
-            join.insert(Side::Right, rec(id, 1, 10 + id)),
-            Ok(Inserting::Accepted)
-        );
+        assert_eq!(join.insert(Side::Right, rec(id, 1, 10 + id)), ACCEPTED);
     }
-    assert_eq!(
-        join.insert(Side::Left, rec(50, 1, 12)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Left, rec(50, 1, 12)), ACCEPTED);
     assert_eq!(join.pending_pairs(), 6);
     assert_eq!(join.drain(&mut []), 0);
     assert!(join.pending());
@@ -120,11 +88,14 @@ fn full_output_buffer_resumes_without_losing_or_repeating_pairs() {
         join.insert(Side::Right, rec(9, 1, 12)),
         Err(Refusal::Pending)
     );
-    assert_eq!(join.retire(&mut [GONE; 4]), Err(Refusal::Pending));
+    assert_eq!(
+        join.retire(&mut [Retired::default(); 4]),
+        Err(Refusal::Pending)
+    );
     assert_eq!(join, before);
 
     let mut seen = Vec::new();
-    let mut buffer = [BLANK; 4];
+    let mut buffer = [Pair::default(); 4];
     assert_eq!(join.drain(&mut buffer), 4);
     seen.extend_from_slice(&buffer);
     assert_eq!(join.pending_pairs(), 2);
@@ -137,7 +108,10 @@ fn full_output_buffer_resumes_without_losing_or_repeating_pairs() {
         join.advance_watermark(Side::Right, 1_000),
         Ok(Advancing::Advanced)
     );
-    assert_eq!(join.retire(&mut [GONE; 4]), Err(Refusal::Pending));
+    assert_eq!(
+        join.retire(&mut [Retired::default(); 4]),
+        Err(Refusal::Pending)
+    );
     assert_eq!(join.drain(&mut buffer), 2);
     seen.extend_from_slice(&buffer[..2]);
     assert!(!join.pending());
@@ -152,10 +126,7 @@ fn capacity_full_mismatch_and_late_are_refusals_without_mutation() {
     assert_eq!(join.capacity(Side::Left), 2);
     assert_eq!(join.capacity(Side::Right), 1);
     assert!(join.is_empty());
-    assert_eq!(
-        join.insert(Side::Left, rec(1, 0, 5)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Left, rec(1, 0, 5)), ACCEPTED);
     let single = join.clone();
     assert_eq!(
         join.insert(Side::Left, rec(1, 3, 9)),
@@ -163,14 +134,8 @@ fn capacity_full_mismatch_and_late_are_refusals_without_mutation() {
     );
     assert_eq!(join, single);
     // Identities are per side.
-    assert_eq!(
-        join.insert(Side::Right, rec(1, 7, 50)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Left, rec(2, 0, 6)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Right, rec(1, 7, 50)), ACCEPTED);
+    assert_eq!(join.insert(Side::Left, rec(2, 0, 6)), ACCEPTED);
     let before = join.clone();
     assert_eq!(join.insert(Side::Left, rec(3, 0, 7)), Err(Refusal::Full));
     assert_eq!(join.insert(Side::Right, rec(2, 0, 7)), Err(Refusal::Full));
@@ -178,8 +143,8 @@ fn capacity_full_mismatch_and_late_are_refusals_without_mutation() {
         join.advance_watermark(Side::Left, 6),
         Ok(Advancing::Advanced)
     );
-    assert_eq!(join.insert(Side::Left, rec(3, 0, 6)), Err(Refusal::Late));
-    assert_eq!(join.insert(Side::Left, rec(3, 0, 0)), Err(Refusal::Late));
+    assert_eq!(join.insert(Side::Left, rec(3, 0, 6)), LATE);
+    assert_eq!(join.insert(Side::Left, rec(3, 0, 0)), LATE);
     let held = join.clone();
     assert_eq!(
         join.advance_watermark(Side::Left, 5),
@@ -201,7 +166,7 @@ fn capacity_full_mismatch_and_late_are_refusals_without_mutation() {
 
     let mut zero = Join::<0, 0>::new(Bounds::new(0, 0));
     assert_eq!(zero.insert(Side::Left, rec(1, 1, 1)), Err(Refusal::Full));
-    assert_eq!(zero.retire(&mut [GONE; 1]), Ok(0));
+    assert_eq!(zero.retire(&mut [Retired::default(); 1]), Ok(0));
 }
 
 #[test]
@@ -212,7 +177,7 @@ fn retirement_needs_both_watermarks_and_is_resumable() {
     }
     assert_eq!(join.insert(Side::Right, rec(7, 1, 10)), ACCEPTED);
     assert_eq!(join.retirable(), 0);
-    assert_eq!(join.retire(&mut [GONE; 4]), Ok(0));
+    assert_eq!(join.retire(&mut [Retired::default(); 4]), Ok(0));
     // Left 10 reaches right times 8..=15; right watermark 14 keeps it alive.
     advance(&mut join, Side::Right, 14);
     assert_eq!(join.retirable(), 0);
@@ -220,13 +185,13 @@ fn retirement_needs_both_watermarks_and_is_resumable() {
     // reached either: offered again they would not be late yet, so they stay.
     advance(&mut join, Side::Right, 16);
     assert_eq!(join.retirable(), 0);
-    assert_eq!(join.retire(&mut [GONE; 4]), Ok(0));
+    assert_eq!(join.retire(&mut [Retired::default(); 4]), Ok(0));
     advance(&mut join, Side::Left, 10);
     assert_eq!(join.retirable(), 1);
     advance(&mut join, Side::Left, 11);
     assert_eq!(join.retirable(), 2);
     assert_eq!(join.retire(&mut []), Ok(0));
-    let mut out = [GONE; 1];
+    let mut out = [Retired::default(); 1];
     assert_eq!(join.retire(&mut out), Ok(1));
     assert_eq!(out[0].record.id, 1);
     assert_eq!(join.retirable(), 1);
@@ -256,26 +221,12 @@ fn retirement_needs_both_watermarks_and_is_resumable() {
     // match it: it stays, and the right record at 17 finds it.
     assert_eq!(join.retirable(), 0);
     assert_eq!(join.insert(Side::Right, rec(8, 0, 17)), ACCEPTED);
-    assert_eq!(
-        drain_all(&mut join, 1),
-        [Pair {
-            key: 0,
-            left: 3,
-            right: 8
-        }]
-    );
+    assert_eq!(drain_all(&mut join, 1), [pair(0, 3, 8)]);
 }
 
 #[test]
 fn u64_limits_saturate_exactly() {
     let max = u64::MAX;
-    assert_eq!(
-        Bounds::new(max, max).reach(Side::Left, 5),
-        Reach {
-            first: 0,
-            last: max
-        }
-    );
     assert_eq!(
         Bounds::new(3, 3).reach(Side::Right, max),
         Reach {
@@ -284,30 +235,14 @@ fn u64_limits_saturate_exactly() {
         }
     );
     let mut join = Join::<2, 2>::new(Bounds::new(3, 3));
-    assert_eq!(
-        join.insert(Side::Left, rec(max, max, max)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Left, rec(0, max, 0)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Right, rec(max, max, max - 3)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        drain_all(&mut join, 2),
-        [Pair {
-            key: max,
-            left: max,
-            right: max
-        }]
-    );
+    assert_eq!(join.insert(Side::Left, rec(max, max, max)), ACCEPTED);
+    assert_eq!(join.insert(Side::Left, rec(0, max, 0)), ACCEPTED);
+    assert_eq!(join.insert(Side::Right, rec(max, max, max - 3)), ACCEPTED);
+    assert_eq!(drain_all(&mut join, 2), [pair(max, max, max)]);
     // Left 0 can match nothing above right watermark `max - 1`, and its own
     // watermark reaching 0 makes a replay of it late: only then it retires.
     advance(&mut join, Side::Right, max - 1);
-    let mut out = [GONE; 4];
+    let mut out = [Retired::default(); 4];
     assert_eq!(join.retire(&mut out), Ok(0));
     advance(&mut join, Side::Left, 0);
     assert_eq!(join.retire(&mut out), Ok(1));

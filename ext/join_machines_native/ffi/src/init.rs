@@ -1,15 +1,29 @@
 //! Private native entry point.
-use crate::{CAPACITY, Wrapper, bounds_reach, other};
+use crate::{
+    CAPACITY, Wrapper, bounds_reach, other, reach_contains, validate_bounds, validate_pair,
+    validate_reach, validate_record, validate_retired, validate_watermark,
+};
 use magnus::{Error, RClass, Ruby, function, method, prelude::*};
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("JoinMachines")?;
     module.const_set("CAPACITY", CAPACITY)?;
+    crate::classes::resolve(ruby, module)?;
     module.define_singleton_method("other", function!(other, 1))?;
     // Bounds is a Data class defined in Ruby; its arithmetic lives here.
     let bounds: RClass = module.const_get("Bounds")?;
-    bounds.define_private_method("native_reach", method!(bounds_reach, 2))?;
+    bounds.define_method("reach", method!(bounds_reach, 2))?;
+    let reach: RClass = module.const_get("Reach")?;
+    reach.define_method("include?", method!(reach_contains, 1))?;
+    // The Data classes are defined in Ruby; the core validates them here. Each
+    // hook answers the core value (discarded) or raises.
+    module.define_singleton_method("__reach", function!(validate_reach, 2))?;
+    module.define_singleton_method("__bounds", function!(validate_bounds, 2))?;
+    module.define_singleton_method("__pair", function!(validate_pair, 3))?;
+    module.define_singleton_method("__record", function!(validate_record, 3))?;
+    module.define_singleton_method("__retired", function!(validate_retired, 2))?;
+    module.define_singleton_method("__watermark", function!(validate_watermark, 1))?;
     let class = module.define_class("Join", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;

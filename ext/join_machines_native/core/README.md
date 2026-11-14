@@ -53,9 +53,10 @@ not remembered: other contents under it are judged as any new record is
 when the side moved forward, `Advancing::Repeated` when it already held exactly
 that value (an idempotent repeat that changes nothing), and
 `Err(Refusal::WatermarkRegressed)` for a value behind it. `Advancing` is
-`window_machines::Advancing`, re-exported: the side's `Watermark` gives that
-answer itself and the join passes it on, renaming only the sibling's
-`Regressed` refusal to its own `WatermarkRegressed`.
+`window_machines::Advancing`, re-exported. The join asks the side's
+`Watermark` where it stands and then sets it with `Watermark::at`, so it never
+has to translate sibling refusals (`Overflow`, `Undersized`, `Late`, `Full`)
+that `Watermark::advance` can never give.
 
 The sibling seam is public: `Watermark` and `Advancing` are re-exported, `side_watermark(side)`
 returns a side's `Watermark` by value (next to `watermark(side)`, which still
@@ -66,12 +67,18 @@ advances a side from a watermark the caller owns, with the same answers as
 agree) and `Err(Refusal::WatermarkRegressed)` once the side has a value; it
 never clears a side.
 
+`Reach` keeps its fields private and is valid or does not exist:
+`Reach::new(first, last)` is `None` unless `first <= last`, and `Bounds::reach`
+always answers one (it saturates at both edges). `Record`, `Pair`, `Retired`
+and `Bounds` hold any value of their field types, so their fields stay public
+(`Bounds` behind its infallible `new`).
+
 `Pair` and `Retired` implement `Default` so an output buffer is
 `[Pair::default(); N]`. The default is a placeholder, not a
 sentinel: a real zero-valued output equals it, so read only the entries reported.
 
 The Ruby gem mirrors `Bounds`, `Reach`, `Record`, `Pair` and `Retired` as
-`Data` values of the same names and fields, and takes `Bounds` and `Record`
+`Data` values of the same names and fields, checked by the core when built, and takes `Bounds` and `Record`
 where this core does. `side_watermark` answers a `Data` with the one reader
 `value`, which is what its `advance_watermark_from` reads.
 
@@ -157,6 +164,13 @@ advanced) and `⊕` for addition saturating at `u64::MAX`.
   `Late`; and every two accepted records that match are drained as a pair,
   because the earlier one is still held when the later one is accepted
   (rule 1 kept it).
+- **No clock.** Every time here is event time; the core reads and records no
+  monotonic clock. An honoured `advance_watermark`/`advance_watermark_from`
+  records the side's watermark (progress, not a clock) on `Advanced` and
+  nothing on `Repeated`.
+- **No unreachable arms.** No `panic!`, `assert!`, `unreachable!` or `expect`
+  outside tests. The owed pair carries the opposite record it names, so
+  `drain` never looks a slot up again.
 - **Refusals change nothing**, and none is remembered: each is an answer about
   the join as it is now. `Late` stays `Late` only because watermarks, which
   honoured calls record, never regress.

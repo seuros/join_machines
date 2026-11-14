@@ -247,7 +247,7 @@ impl Run {
     }
 
     fn drain(&mut self) {
-        let mut buffer = [BLANK; 3];
+        let mut buffer = [Pair::default(); 3];
         let room = self.draws.index(4);
         let written = self.join.drain(&mut buffer[..room]);
         assert_eq!(written, room.min(self.model.owed.len()));
@@ -288,7 +288,7 @@ impl Run {
     }
 
     fn retire(&mut self) {
-        let mut buffer = [GONE; 3];
+        let mut buffer = [Retired::default(); 3];
         let room = self.draws.index(4);
         let snapshot = self.join.clone();
         let result = self.join.retire(&mut buffer[..room]);
@@ -321,7 +321,7 @@ impl Run {
 
     /// Drain what is left, then judge the whole run.
     fn finish(mut self) -> Counts {
-        let mut buffer = [BLANK; 3];
+        let mut buffer = [Pair::default(); 3];
         while self.join.pending() {
             let written = self.join.drain(&mut buffer);
             self.model.drained(&buffer[..written]);

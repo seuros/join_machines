@@ -23,7 +23,7 @@ class JoinTest < Minitest::Test
     assert_raises(ArgumentError) { JoinMachines::Join.new }
     assert_raises(ArgumentError) { JoinMachines::Join.new(1, 2) }
     assert_raises(ArgumentError) { j.capacity }
-    assert_raises(ArgumentError) { j.capacity(:middle) }
+    assert_raises(RangeError) { j.capacity(:middle) }
     assert_raises(TypeError) { JoinMachines::Join.new(before: 1, after: 2) }
     assert_raises(TypeError) { JoinMachines::Join.new([1, 2]) }
     refute_respond_to j, :before
@@ -251,8 +251,8 @@ class JoinTest < Minitest::Test
       assert_raises(RangeError) { j.drain(bad) }
       assert_raises(RangeError) { j.retire(bad) }
     end
-    assert_raises(ArgumentError) { j.insert(:middle, rec(1, 1, 1)) }
-    assert_raises(ArgumentError) { j.size(:middle) }
+    assert_raises(RangeError) { j.insert(:middle, rec(1, 1, 1)) }
+    assert_raises(RangeError) { j.size(:middle) }
     assert_raises(ArgumentError) { j.insert(:left, 1, 1, 1) }
     assert_raises(TypeError) { j.insert(:left, [1, 1, 1]) }
     assert j.empty?
@@ -327,7 +327,7 @@ class JoinTest < Minitest::Test
     assert_equal :repeated, other.advance_watermark_from(:right, j.side_watermark(:left))
     assert_equal :watermark_regressed, other.advance_watermark_from(:right, j.side_watermark(:right))
     assert_equal 9, other.watermark(:right)
-    assert_raises(ArgumentError) { j.side_watermark(:middle) }
+    assert_raises(RangeError) { j.side_watermark(:middle) }
   end
 
   def test_bounds_reach_and_other_side
@@ -341,11 +341,11 @@ class JoinTest < Minitest::Test
     assert_raises(TypeError) { reach.include?(8.0) }
     assert_raises(TypeError) { bounds.reach(:left, nil) }
     assert_raises(RangeError) { bounds.reach(:left, -1) }
-    assert_raises(ArgumentError) { bounds.reach(:middle, 1) }
+    assert_raises(RangeError) { bounds.reach(:middle, 1) }
     assert_raises(TypeError) { J::Bounds.new(1.0, 2).reach(:left, 1) }
     assert_raises(NoMethodError) { bounds.native_reach(:left, 1) }
     assert_equal %i[right left], [J.other(:left), J.other(:right)]
-    assert_raises(ArgumentError) { J.other(:middle) }
+    assert_raises(RangeError) { J.other(:middle) }
     assert_raises(TypeError) { J.other('left') }
   end
 
@@ -362,10 +362,10 @@ class JoinTest < Minitest::Test
       assert_raises(RangeError) { j.advance_watermark_from(:left, Data.define(:value).new(bad)) }
     end
     assert_raises(TypeError) { j.advance_watermark_from(nil, mark) }
-    assert_raises(ArgumentError) { j.advance_watermark_from(:middle, mark) }
+    assert_raises(RangeError) { j.advance_watermark_from(:middle, mark) }
     mark.advance(4)
     assert_raises(TypeError) { j.advance_watermark_from(nil, mark) }
-    assert_raises(ArgumentError) { j.advance_watermark_from(:middle, mark) }
+    assert_raises(RangeError) { j.advance_watermark_from(:middle, mark) }
     assert_nil j.watermark(:left)
     j.freeze
     assert_raises(FrozenError) { j.advance_watermark_from(:left, mark) }

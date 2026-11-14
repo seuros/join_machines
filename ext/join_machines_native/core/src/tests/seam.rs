@@ -38,7 +38,7 @@ fn caller_owned_watermark_in_lockstep_equals_the_joins_own() {
     );
     assert_eq!(owned[0].advance(20), Ok(Advancing::Advanced));
     assert_eq!(join.side_watermark(Side::Left), owned[0]);
-    assert_eq!(join.insert(Side::Left, rec(1, 1, 20)), Err(Refusal::Late));
+    assert_eq!(join.insert(Side::Left, rec(1, 1, 20)), LATE);
     // Lateness is judged on the record's own side only: the right watermark
     // at `u64::MAX` refuses every right record and no left one.
     assert_eq!(join.insert(Side::Left, rec(1, 1, 21)), ACCEPTED);
@@ -54,14 +54,8 @@ fn caller_owned_watermark_in_lockstep_equals_the_joins_own() {
 #[test]
 fn regression_through_a_caller_watermark_is_refused_without_mutation() {
     let mut join = Join::<4, 4>::new(Bounds::new(2, 5));
-    assert_eq!(
-        join.insert(Side::Left, rec(1, 9, 10)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Right, rec(2, 9, 30)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Left, rec(1, 9, 10)), ACCEPTED);
+    assert_eq!(join.insert(Side::Right, rec(2, 9, 30)), ACCEPTED);
     assert_eq!(
         join.advance_watermark(Side::Right, 12),
         Ok(Advancing::Advanced)
@@ -105,31 +99,12 @@ fn regression_through_a_caller_watermark_is_refused_without_mutation() {
 
 #[test]
 fn output_element_defaults_are_overwritten_placeholders() {
-    assert_eq!(Pair::default(), BLANK);
-    assert_eq!(Retired::default(), GONE);
     let mut join = Join::<4, 4>::new(Bounds::new(0, 0));
-    assert_eq!(
-        join.insert(Side::Right, rec(7, 3, 5)),
-        Ok(Inserting::Accepted)
-    );
-    assert_eq!(
-        join.insert(Side::Left, rec(8, 3, 5)),
-        Ok(Inserting::Accepted)
-    );
+    assert_eq!(join.insert(Side::Right, rec(7, 3, 5)), ACCEPTED);
+    assert_eq!(join.insert(Side::Left, rec(8, 3, 5)), ACCEPTED);
     let mut pairs = [Pair::default(); 3];
     assert_eq!(join.drain(&mut pairs), 1);
-    assert_eq!(
-        pairs,
-        [
-            Pair {
-                key: 3,
-                left: 8,
-                right: 7
-            },
-            Pair::default(),
-            Pair::default()
-        ]
-    );
+    assert_eq!(pairs, [pair(3, 8, 7), Pair::default(), Pair::default()]);
     advance(&mut join, Side::Left, 5);
     advance(&mut join, Side::Right, 5);
     let mut gone = [Retired::default(); 3];

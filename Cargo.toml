@@ -8,9 +8,9 @@ rust-version = "1.99"
 license = "MIT"
 [workspace.dependencies]
 join-machines = { path = "ext/join_machines_native/core" }
-magnus = { version = "0.9.3", default-features = false }
+magnus = { version = "0.9.3", default-features = false, features = ["rb-sys"] }
 rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
-window-machines = ">=0.3"
+window-machines = ">=0.4"
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_must_use = "warn"

@@ -15,7 +15,15 @@ module JoinMachines
   # The core's `Side::other`: the opposite input.
   def self.other: (side) -> side
 
-  # Mirrors the core's `Reach`.
+  # Every Data value is checked by the core when built, `with` included:
+  # TypeError for a wrong type, RangeError for a value the core rejects
+  # (an Integer outside 0..2**64-1, a side other than :left or :right).
+  # Every value class is sealed: no `allocate`, subclassing raises TypeError.
+  # Where the binding reads one back it takes only an instance of exactly the
+  # class (TypeError otherwise) and re-validates its members (RangeError).
+
+  # Mirrors the core's `Reach`, validated by `Reach::new`: RangeError unless
+  # first <= last.
   class Reach < Data
     attr_reader first: Integer
     attr_reader last: Integer
@@ -25,7 +33,7 @@ module JoinMachines
     def include?: (Integer timestamp) -> bool
   end
 
-  # Mirrors the core's `Bounds`.
+  # Mirrors the core's `Bounds`: any two Integers in 0..2**64-1.
   class Bounds < Data
     attr_reader before: Integer
     attr_reader after: Integer
@@ -34,6 +42,7 @@ module JoinMachines
     def reach: (side, Integer timestamp) -> Reach
   end
 
+  # Mirrors the core's `Pair`: any three Integers in 0..2**64-1.
   class Pair < Data
     attr_reader key: Integer
     attr_reader left: Integer
@@ -42,7 +51,7 @@ module JoinMachines
                 | (key: Integer, left: Integer, right: Integer) -> Pair
   end
 
-  # Mirrors the core's `Record`.
+  # Mirrors the core's `Record`: any three Integers in 0..2**64-1.
   class Record < Data
     attr_reader id: Integer
     attr_reader key: Integer
@@ -51,7 +60,7 @@ module JoinMachines
                 | (id: Integer, key: Integer, timestamp: Integer) -> Record
   end
 
-  # Mirrors the core's `Retired`.
+  # Mirrors the core's `Retired`: TypeError unless `record` is a Record.
   class Retired < Data
     attr_reader side: side
     attr_reader record: Record
@@ -65,7 +74,8 @@ module JoinMachines
   end
 
   # What `Join#side_watermark` answers: a frozen copy of one input's progress.
-  # `value` is nil before the first watermark. It satisfies `_Watermark`.
+  # `value` is nil before the first watermark, else an Integer in
+  # 0..2**64-1. It satisfies `_Watermark`.
   class Watermark < Data
     attr_reader value: Integer?
     def self.new: (Integer? value) -> Watermark
@@ -90,12 +100,16 @@ module JoinMachines
     def insert: (side, Record record) -> (:accepted | :duplicate | :mismatch | :pending | :late | :full)
     def pending?: () -> bool
     def pending_pairs: () -> Integer
-    # At most `max` owed pairs, [] when none is owed. Never refuses.
+    # At most `max` owed pairs, [] when none is owed. Never refuses. A raise
+    # while building the answer drains nothing; FrozenError if building it
+    # froze the join, RuntimeError if it changed it; nothing drained.
     def drain: (Integer max) -> Array[Pair]
     # Honoured: :advanced, and :repeated when the side already held exactly
     # `value` (nothing changes). Refused: :watermark_regressed.
     def advance_watermark: (side, Integer value) -> (advancing | :watermark_regressed)
-    # Reads `watermark.value`. Honoured: :advanced, and :repeated when the side
+    # Reads this gem's Watermark natively (TypeError for a subclass of it),
+    # any other object through `value`; FrozenError, nothing advanced, if
+    # `value` froze the join. Honoured: :advanced, and :repeated when the side
     # already equals it, a nil value against a side with no watermark
     # included. Refused: :watermark_regressed, a nil value against a side that
     # holds one included.
@@ -109,6 +123,9 @@ module JoinMachines
     # timestamp (so a replay of it is :late).
     def retirable: () -> Integer
     # Honoured: the retired records, [] when none is retirable. Refused: :pending.
+    # A raise while building the answer retires nothing; FrozenError if
+    # building it froze the join, RuntimeError if it changed it; nothing
+    # retired.
     def retire: (Integer max) -> (Array[Retired] | :pending)
   end
 end
