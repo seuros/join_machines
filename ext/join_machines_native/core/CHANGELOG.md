@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/join_machines/compare/join-machines-v0.6.0...join-machines-v0.7.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2 (exact_fields, symbols!, frozen-first)
+
+### Features
+
+* adopt matryona-machines 0.2 (exact_fields, symbols!, frozen-first) ([84d94d2](https://github.com/seuros/join_machines/commit/84d94d2fc841d1dcbc3d0cdd8da938dcd3547298))
+
 ## [0.6.0](https://github.com/seuros/join_machines/compare/join-machines-v0.5.0...join-machines-v0.6.0) (2026-11-14)
 
 
