@@ -8,134 +8,76 @@ use classes::{build, classes, members};
 use join_machines::{
     Advancing, Bounds, Inserting, Join, Pair, Reach, Record, Refusal, Retired, Side, Watermark,
 };
-use magnus::{
-    Error, Integer, RArray, Ruby, Symbol, TryConvert, Value, typed_data::Obj, value::ReprValue,
-};
+use magnus::{Error, RArray, Ruby, Symbol, Value, typed_data::Obj, value::ReprValue};
+use matryona_machines::ruby::{Class, Symbols, integer, keep, optional, symbol};
 
 /// Live records held per input.
 const CAPACITY: usize = 64;
 
-#[derive(Clone, Copy)]
-struct Number(u64);
-
-impl TryConvert for Number {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                Ruby::get_with(value).exception_type_error(),
-                "expected an Integer (unsigned 64-bit)",
-            ));
-        }
-        u64::try_convert(value).map(Self)
-    }
-}
-
-/// Runs `act` on a copy of the cell's value and keeps the copy only once the
-/// answer `act` builds exists, so a raise while building it (a failed
-/// allocation, a redefined `new`) loses nothing. No `RefCell` guard is alive
-/// while Ruby runs. A build that froze `owner` meanwhile raises
-/// `FrozenError`, one that changed the value (a redefined `new` calling back
-/// in) `RuntimeError`; neither applies the copy.
-fn on_copy<T: Clone + PartialEq, R>(
-    ruby: &Ruby,
-    owner: impl ReprValue,
-    cell: &RefCell<T>,
-    act: impl FnOnce(&mut T) -> Result<R, Error>,
-) -> Result<R, Error> {
-    owner.check_frozen()?;
-    let before = cell.borrow().clone();
-    let mut after = before.clone();
-    let answer = act(&mut after)?;
-    owner.check_frozen()?;
-    let mut held = cell.borrow_mut();
-    if *held != before {
-        return Err(Error::new(
-            ruby.exception_runtime_error(),
-            "the join changed while the answer was built; the call was not applied",
-        ));
-    }
-    *held = after;
-    Ok(answer)
-}
-
 /// A Rust buffer for at most `max` entries, of which `ready` exist.
-fn buffer<T: Clone + Default>(max: Number, ready: usize) -> Vec<T> {
-    let room = usize::try_from(max.0).unwrap_or(usize::MAX);
+fn buffer<T: Clone + Default>(max: u64, ready: usize) -> Vec<T> {
+    let room = usize::try_from(max).unwrap_or(usize::MAX);
     vec![T::default(); room.min(ready)]
 }
 
-/// `:left` or `:right`.
-#[derive(Clone, Copy)]
-struct Input(Side);
-
-impl TryConvert for Input {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        let ruby = Ruby::get_with(value);
-        let symbol = Symbol::from_value(value).ok_or_else(|| {
-            Error::new(ruby.exception_type_error(), "side must be :left or :right")
-        })?;
-        match symbol.name()?.as_ref() {
-            "left" => Ok(Self(Side::Left)),
-            "right" => Ok(Self(Side::Right)),
-            _ => Err(Error::new(
-                ruby.exception_range_error(),
-                "side must be :left or :right",
-            )),
-        }
+matryona_machines::symbols! {
+    /// The sibling's `Side` as `:left` and `:right`.
+    Sides for Side as "side" {
+        Left => "left",
+        Right => "right",
     }
 }
 
-const fn side_name(side: Side) -> &'static str {
-    match side {
-        Side::Left => "left",
-        Side::Right => "right",
-    }
+/// `:left` or `:right`: `TypeError` for a non-Symbol, `RangeError` for
+/// another Symbol.
+fn side(value: Value) -> Result<Side, Error> {
+    Sides::parse(&Ruby::get_with(value), value)
 }
 
 /// The members of a gem value (exactly its class, read natively), each
-/// converted to a `Number`: a forged value raises, it never reaches the core.
+/// converted to a `u64` under its member's name: a forged value raises, it
+/// never reaches the core.
 fn numbers<const N: usize>(
     value: Value,
-    class: impl FnOnce(&classes::Classes) -> magnus::value::Opaque<magnus::RClass>,
-) -> Result<[Number; N], Error> {
+    class: impl FnOnce(&classes::Classes) -> Class,
+    message: &'static str,
+    names: [&str; N],
+) -> Result<[u64; N], Error> {
     let ruby = Ruby::get_with(value);
-    let read = members::<N>(&ruby, value, class(classes(&ruby)?))?;
-    let mut out = [Number(0); N];
-    for (slot, member) in out.iter_mut().zip(read) {
-        *slot = Number::try_convert(member)?;
+    let read = members::<N>(&ruby, value, class(classes(&ruby)?), message)?;
+    let mut out = [0; N];
+    for ((slot, member), name) in out.iter_mut().zip(read).zip(names) {
+        *slot = integer(member, name)?;
     }
     Ok(out)
 }
 
 /// A `JoinMachines::Bounds`, re-validated through the core's `Bounds::new`.
-#[derive(Clone, Copy)]
-struct Limits(Bounds);
-
-impl TryConvert for Limits {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        let [before, after] = numbers(value, |known| known.bounds)?;
-        Ok(Self(Bounds::new(before.0, after.0)))
-    }
+fn limits(value: Value) -> Result<Bounds, Error> {
+    let [before, after] = numbers(
+        value,
+        |known| known.bounds,
+        "expected a JoinMachines::Bounds",
+        ["before", "after"],
+    )?;
+    Ok(Bounds::new(before, after))
 }
 
 /// A `JoinMachines::Record`: every field an Integer in `0..2**64`.
-#[derive(Clone, Copy)]
-struct Entry(Record);
-
-impl TryConvert for Entry {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        let [id, key, timestamp] = numbers(value, |known| known.record)?;
-        Ok(Self(Record {
-            id: id.0,
-            key: key.0,
-            timestamp: timestamp.0,
-        }))
-    }
+fn entry(value: Value) -> Result<Record, Error> {
+    let names = ["id", "key", "timestamp"];
+    let [id, key, timestamp] = numbers(
+        value,
+        |known| known.record,
+        "expected a JoinMachines::Record",
+        names,
+    )?;
+    Ok(Record { id, key, timestamp })
 }
 
 /// The core's `Reach::new`: what `Reach.new` is held to.
-fn checked_reach(ruby: &Ruby, first: Number, last: Number) -> Result<Reach, Error> {
-    Reach::new(first.0, last.0).ok_or_else(|| {
+fn checked_reach(ruby: &Ruby, first: u64, last: u64) -> Result<Reach, Error> {
+    Reach::new(first, last).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
             "a reach's first must not be above its last",
@@ -144,7 +86,8 @@ fn checked_reach(ruby: &Ruby, first: Number, last: Number) -> Result<Reach, Erro
 }
 
 /// Private hook behind `Reach.new`.
-fn validate_reach(ruby: &Ruby, first: Number, last: Number) -> Result<(), Error> {
+fn validate_reach(ruby: &Ruby, first: Value, last: Value) -> Result<(), Error> {
+    let (first, last) = (integer(first, "first")?, integer(last, "last")?);
     checked_reach(ruby, first, last).map(|_| ())
 }
 
@@ -153,21 +96,47 @@ fn validate_reach(ruby: &Ruby, first: Number, last: Number) -> Result<(), Error>
 /// `Record` and `Retired` accept every value of their field types, so
 /// converting each argument to that type (an Integer in `0..2**64`, a side, a
 /// `JoinMachines::Record`, `nil` or an Integer) is the whole check.
-const fn validate_bounds(_before: Number, _after: Number) {}
-const fn validate_pair(_key: Number, _left: Number, _right: Number) {}
-const fn validate_record(_id: Number, _key: Number, _timestamp: Number) {}
-const fn validate_retired(_input: Input, _record: Entry) {}
-const fn validate_watermark(_value: Option<Number>) {}
+fn validate_bounds(before: Value, after: Value) -> Result<(), Error> {
+    integer::<u64>(before, "before")?;
+    integer::<u64>(after, "after").map(drop)
+}
+
+fn validate_pair(key: Value, left: Value, right: Value) -> Result<(), Error> {
+    integer::<u64>(key, "key")?;
+    integer::<u64>(left, "left")?;
+    integer::<u64>(right, "right").map(drop)
+}
+
+fn validate_record(id: Value, key: Value, timestamp: Value) -> Result<(), Error> {
+    integer::<u64>(id, "id")?;
+    integer::<u64>(key, "key")?;
+    integer::<u64>(timestamp, "timestamp").map(drop)
+}
+
+fn validate_retired(input: Value, record: Value) -> Result<(), Error> {
+    side(input)?;
+    entry(record).map(drop)
+}
+
+fn validate_watermark(value: Value) -> Result<(), Error> {
+    optional::<u64>(value, "value").map(drop)
+}
 
 /// `nil` or an Integer in `0..2**64`, as the sibling's `Watermark`.
-fn watermark_of(value: Option<Number>) -> Watermark {
-    value.map_or_else(Watermark::default, |value| Watermark::at(value.0))
+fn watermark_of(value: Option<u64>) -> Watermark {
+    value.map_or_else(Watermark::default, Watermark::at)
 }
 
 /// `Reach#include?`: the core's `Reach::contains`.
-fn reach_contains(ruby: &Ruby, this: Value, timestamp: Number) -> Result<bool, Error> {
-    let [first, last] = numbers(this, |known| known.reach)?;
-    Ok(checked_reach(ruby, first, last)?.contains(timestamp.0))
+fn reach_contains(ruby: &Ruby, this: Value, timestamp: Value) -> Result<bool, Error> {
+    let timestamp = integer(timestamp, "timestamp")?;
+    let [first, last] = numbers(
+        this,
+        |known| known.reach,
+        "expected a JoinMachines::Reach",
+        ["first", "last"],
+    )?;
+    Ok(checked_reach(ruby, first, last)?.contains(timestamp))
 }
 
 /// Ruby symbol name of a refusal: the snake case of the core variant.
@@ -182,22 +151,26 @@ const fn refusal(refused: Refusal) -> &'static str {
 }
 
 fn advancing(ruby: &Ruby, outcome: Result<Advancing, Refusal>) -> Symbol {
-    ruby.to_symbol(match outcome {
-        Ok(Advancing::Advanced) => "advanced",
-        Ok(Advancing::Repeated) => "repeated",
-        Err(refused) => refusal(refused),
-    })
+    symbol(
+        ruby,
+        match outcome {
+            Ok(Advancing::Advanced) => "advanced",
+            Ok(Advancing::Repeated) => "repeated",
+            Err(refused) => refusal(refused),
+        },
+    )
 }
 
 /// `Bounds#reach(side, timestamp)`: the core's `Reach`, as a `Reach`.
-fn bounds_reach(ruby: &Ruby, this: Value, input: Input, timestamp: Number) -> Result<Value, Error> {
-    let reach = Limits::try_convert(this)?.0.reach(input.0, timestamp.0);
+fn bounds_reach(ruby: &Ruby, this: Value, input: Value, timestamp: Value) -> Result<Value, Error> {
+    let (input, timestamp) = (side(input)?, integer(timestamp, "timestamp")?);
+    let reach = limits(this)?.reach(input, timestamp);
     build(ruby, classes(ruby)?.reach, (reach.first(), reach.last()))
 }
 
 /// `Side::other` for the Symbol that stands for a side.
-fn other(ruby: &Ruby, input: Input) -> Symbol {
-    ruby.to_symbol(side_name(input.0.other()))
+fn other(ruby: &Ruby, input: Value) -> Result<Symbol, Error> {
+    Ok(Sides::symbol(ruby, side(input)?.other()))
 }
 
 #[magnus::wrap(class = "JoinMachines::Join", free_immediately, size)]
@@ -206,10 +179,10 @@ struct Wrapper {
 }
 
 impl Wrapper {
-    fn new(bounds: Limits) -> Self {
-        Self {
-            core: RefCell::new(Join::new(bounds.0)),
-        }
+    fn new(bounds: Value) -> Result<Self, Error> {
+        Ok(Self {
+            core: RefCell::new(Join::new(limits(bounds)?)),
+        })
     }
 
     fn bounds(ruby: &Ruby, this: &Self) -> Result<Value, Error> {
@@ -221,14 +194,18 @@ impl Wrapper {
         )
     }
 
-    fn insert(ruby: &Ruby, this: Obj<Self>, input: Input, record: Entry) -> Result<Symbol, Error> {
+    fn insert(ruby: &Ruby, this: Obj<Self>, input: Value, record: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().insert(input.0, record.0);
-        Ok(ruby.to_symbol(match outcome {
-            Ok(Inserting::Accepted) => "accepted",
-            Ok(Inserting::Duplicate) => "duplicate",
-            Err(refused) => refusal(refused),
-        }))
+        let (input, record) = (side(input)?, entry(record)?);
+        let outcome = this.core.borrow_mut().insert(input, record);
+        Ok(symbol(
+            ruby,
+            match outcome {
+                Ok(Inserting::Accepted) => "accepted",
+                Ok(Inserting::Duplicate) => "duplicate",
+                Err(refused) => refusal(refused),
+            },
+        ))
     }
 
     fn pending(&self) -> bool {
@@ -239,30 +216,42 @@ impl Wrapper {
         self.core.borrow().pending_pairs()
     }
 
-    /// Drains into a Rust buffer and builds every `Pair` through [`on_copy`]:
-    /// a raise while building leaves every pair owed, a freeze meanwhile
+    /// Drains into a Rust buffer and builds every `Pair` through [`keep`]: a
+    /// raise while building leaves every pair owed, a freeze meanwhile
     /// raises `FrozenError`, a re-entrant change `RuntimeError`.
-    fn drain(ruby: &Ruby, this: Obj<Self>, max: Number) -> Result<RArray, Error> {
+    fn drain(ruby: &Ruby, this: Obj<Self>, max: Value) -> Result<RArray, Error> {
+        this.check_frozen()?;
+        let max = integer(max, "max")?;
         let class = classes(ruby)?.pair;
-        on_copy(ruby, this, &this.core, |next| {
-            let mut buffer = buffer::<Pair>(max, next.pending_pairs());
-            let written = next.drain(&mut buffer);
-            let result = ruby.ary_new_capa(written);
-            for pair in &buffer[..written] {
-                result.push(build(ruby, class, (pair.key, pair.left, pair.right))?)?;
-            }
-            Ok(result)
-        })
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |next| {
+                let mut buffer = buffer::<Pair>(max, next.pending_pairs());
+                let written = next.drain(&mut buffer);
+                buffer.truncate(written);
+                buffer
+            },
+            |drained| {
+                let result = ruby.ary_new_capa(drained.len());
+                for pair in drained {
+                    result.push(build(ruby, class, (pair.key, pair.left, pair.right))?)?;
+                }
+                Ok(result)
+            },
+        )
     }
 
     fn advance_watermark(
         ruby: &Ruby,
         this: Obj<Self>,
-        input: Input,
-        value: Number,
+        input: Value,
+        value: Value,
     ) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().advance_watermark(input.0, value.0);
+        let (input, value) = (side(input)?, integer(value, "value")?);
+        let outcome = this.core.borrow_mut().advance_watermark(input, value);
         Ok(advancing(ruby, outcome))
     }
 
@@ -273,25 +262,28 @@ impl Wrapper {
     fn advance_watermark_from(
         ruby: &Ruby,
         this: Obj<Self>,
-        input: Input,
+        input: Value,
         watermark: Value,
     ) -> Result<Symbol, Error> {
         this.check_frozen()?;
+        let input = side(input)?;
         let source = watermark_of(Self::watermark_value(ruby, watermark)?);
         this.check_frozen()?;
         let outcome = this
             .core
             .borrow_mut()
-            .advance_watermark_from(input.0, &source);
+            .advance_watermark_from(input, &source);
         Ok(advancing(ruby, outcome))
     }
 
     /// `watermark`'s value: this gem's `Watermark` exactly (read natively),
     /// `TypeError` for a subclass of it, else a sibling's read by `#value`.
-    fn watermark_value(ruby: &Ruby, watermark: Value) -> Result<Option<Number>, Error> {
+    fn watermark_value(ruby: &Ruby, watermark: Value) -> Result<Option<u64>, Error> {
         let own = classes(ruby)?.watermark;
-        if let Ok([value]) = members::<1>(ruby, watermark, own) {
-            return TryConvert::try_convert(value);
+        if let Ok([value]) =
+            members::<1>(ruby, watermark, own, "expected a JoinMachines::Watermark")
+        {
+            return optional(value, "value");
         }
         if classes::subclassed(ruby, watermark, own) {
             return Err(Error::new(
@@ -305,15 +297,15 @@ impl Wrapper {
                 "watermark must respond to #value",
             ));
         }
-        watermark.funcall("value", ())
+        optional(watermark.funcall("value", ())?, "value")
     }
 
-    fn watermark(&self, input: Input) -> Option<u64> {
-        self.core.borrow().watermark(input.0)
+    fn watermark(&self, input: Value) -> Result<Option<u64>, Error> {
+        Ok(self.core.borrow().watermark(side(input)?))
     }
 
-    fn side_watermark(ruby: &Ruby, this: &Self, input: Input) -> Result<Value, Error> {
-        let watermark = this.core.borrow().side_watermark(input.0);
+    fn side_watermark(ruby: &Ruby, this: &Self, input: Value) -> Result<Value, Error> {
+        let watermark = this.core.borrow().side_watermark(side(input)?);
         build(ruby, classes(ruby)?.watermark, (watermark.value(),))
     }
 
@@ -322,41 +314,54 @@ impl Wrapper {
     }
 
     /// Retires into a Rust buffer and builds every `Retired` through
-    /// [`on_copy`]: a raise while building leaves every record held, a
-    /// freeze meanwhile raises `FrozenError`, a re-entrant change
-    /// `RuntimeError`.
-    fn retire(ruby: &Ruby, this: Obj<Self>, max: Number) -> Result<Value, Error> {
+    /// [`keep`]: a raise while building leaves every record held, a freeze
+    /// meanwhile raises `FrozenError`, a re-entrant change `RuntimeError`.
+    fn retire(ruby: &Ruby, this: Obj<Self>, max: Value) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let max = integer(max, "max")?;
         let known = classes(ruby)?;
-        on_copy(ruby, this, &this.core, |next| {
-            let mut buffer = buffer::<Retired>(max, next.retirable());
-            let written = match next.retire(&mut buffer) {
-                Ok(written) => written,
-                Err(refused) => return Ok(ruby.to_symbol(refusal(refused)).as_value()),
-            };
-            let result = ruby.ary_new_capa(written);
-            for gone in &buffer[..written] {
-                let held = gone.record;
-                let record = build(ruby, known.record, (held.id, held.key, held.timestamp))?;
-                let input = ruby.to_symbol(side_name(gone.side));
-                result.push(build(ruby, known.retired, (input, record))?)?;
-            }
-            Ok(result.as_value())
-        })
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |next| {
+                let mut buffer = buffer::<Retired>(max, next.retirable());
+                next.retire(&mut buffer).map(|written| {
+                    buffer.truncate(written);
+                    buffer
+                })
+            },
+            |retired| {
+                let retired = match retired {
+                    Ok(retired) => retired,
+                    Err(refused) => return Ok(symbol(ruby, refusal(refused)).as_value()),
+                };
+                let result = ruby.ary_new_capa(retired.len());
+                for gone in retired {
+                    let held = gone.record;
+                    let record = build(ruby, known.record, (held.id, held.key, held.timestamp))?;
+                    let input = Sides::symbol(ruby, gone.side);
+                    result.push(build(ruby, known.retired, (input, record))?)?;
+                }
+                Ok(result.as_value())
+            },
+        )
     }
 
-    fn size(&self, input: Input) -> usize {
-        self.core.borrow().len(input.0)
+    fn size(&self, input: Value) -> Result<usize, Error> {
+        Ok(self.core.borrow().len(side(input)?))
     }
 
-    fn include(&self, input: Input, id: Number) -> bool {
-        self.core.borrow().contains(input.0, id.0)
+    fn include(&self, input: Value, id: Value) -> Result<bool, Error> {
+        let (input, id) = (side(input)?, integer(id, "id")?);
+        Ok(self.core.borrow().contains(input, id))
     }
 
     fn empty(&self) -> bool {
         self.core.borrow().is_empty()
     }
 
-    fn capacity(&self, input: Input) -> usize {
-        self.core.borrow().capacity(input.0)
+    fn capacity(&self, input: Value) -> Result<usize, Error> {
+        Ok(self.core.borrow().capacity(side(input)?))
     }
 }

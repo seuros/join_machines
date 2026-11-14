@@ -3,7 +3,7 @@ use crate::{
     CAPACITY, Wrapper, bounds_reach, other, reach_contains, validate_bounds, validate_pair,
     validate_reach, validate_record, validate_retired, validate_watermark,
 };
-use magnus::{Error, RClass, Ruby, function, method, prelude::*};
+use magnus::{Error, Ruby, function, method, prelude::*};
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
@@ -12,9 +12,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     crate::classes::resolve(ruby, module)?;
     module.define_singleton_method("other", function!(other, 1))?;
     // Bounds is a Data class defined in Ruby; its arithmetic lives here.
-    let bounds: RClass = module.const_get("Bounds")?;
+    let known = crate::classes::classes(ruby)?;
+    let bounds = known.bounds.get(ruby);
     bounds.define_method("reach", method!(bounds_reach, 2))?;
-    let reach: RClass = module.const_get("Reach")?;
+    let reach = known.reach.get(ruby);
     reach.define_method("include?", method!(reach_contains, 1))?;
     // The Data classes are defined in Ruby; the core validates them here. Each
     // hook answers the core value (discarded) or raises.

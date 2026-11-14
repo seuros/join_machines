@@ -1,22 +1,12 @@
 //! Random operation streams checked against a naive reference that keeps
 //! every accepted record forever.
 use super::*;
+use matryona_machines::testing::XorShift64;
 use std::collections::BTreeSet;
 
-struct Draws(u64);
-impl Draws {
-    const fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    const fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-    fn index(&mut self, bound: usize) -> usize {
-        usize::try_from(self.below(u64::try_from(bound).unwrap())).unwrap()
-    }
+/// A draw in `0..bound`.
+fn index(draws: &mut XorShift64, bound: usize) -> usize {
+    usize::try_from(draws.below(u64::try_from(bound).unwrap())).unwrap()
 }
 
 /// What the runs did, summed. The four properties are asserted on the way;
@@ -84,8 +74,8 @@ impl Model {
         let delta = i128::from(right.timestamp) - i128::from(left.timestamp);
         left.key == right.key && delta >= -i128::from(before) && delta <= i128::from(after)
     }
-    fn pick(records: &[Record], draws: &mut Draws) -> Option<Record> {
-        (!records.is_empty()).then(|| records[draws.index(records.len())])
+    fn pick(records: &[Record], draws: &mut XorShift64) -> Option<Record> {
+        (!records.is_empty()).then(|| records[index(draws, records.len())])
     }
     fn records(&self, side: usize, live: bool) -> Vec<Record> {
         let seen = self.seen[side].iter();
@@ -94,7 +84,7 @@ impl Model {
     /// The record to insert: a `fresh` one under an identity never used
     /// before, a live record replayed as it is or with its key or timestamp
     /// changed, a retired record replayed, or a refused record offered again.
-    fn candidate(&self, side: usize, fresh: Record, draws: &mut Draws) -> Record {
+    fn candidate(&self, side: usize, fresh: Record, draws: &mut XorShift64) -> Record {
         let choice = draws.below(10);
         let held = Self::pick(&self.records(side, true), draws);
         let replay = match choice {
@@ -199,7 +189,7 @@ const R: usize = 7;
 struct Run {
     join: Join<L, R>,
     model: Model,
-    draws: Draws,
+    draws: XorShift64,
     before: u64,
     after: u64,
     /// Event time both inputs deliver around.
@@ -209,7 +199,7 @@ struct Run {
 
 impl Run {
     fn insert(&mut self) {
-        let side = self.draws.index(2);
+        let side = index(&mut self.draws, 2);
         self.now = self.now.saturating_add(self.draws.below(2));
         let timestamp = self
             .now
@@ -248,7 +238,7 @@ impl Run {
 
     fn drain(&mut self) {
         let mut buffer = [Pair::default(); 3];
-        let room = self.draws.index(4);
+        let room = index(&mut self.draws, 4);
         let written = self.join.drain(&mut buffer[..room]);
         assert_eq!(written, room.min(self.model.owed.len()));
         self.model.drained(&buffer[..written]);
@@ -289,7 +279,7 @@ impl Run {
 
     fn retire(&mut self) {
         let mut buffer = [Retired::default(); 3];
-        let room = self.draws.index(4);
+        let room = index(&mut self.draws, 4);
         let snapshot = self.join.clone();
         let result = self.join.retire(&mut buffer[..room]);
         let (before, after, model) = (self.before, self.after, &mut self.model);
@@ -357,7 +347,7 @@ fn run_model(seed: u64, before: u64, after: u64, base: u64) -> Counts {
     let mut run = Run {
         join: Join::new(Bounds::new(before, after)),
         model: Model::default(),
-        draws: Draws(seed),
+        draws: XorShift64::new(seed),
         before,
         after,
         now: base,
@@ -382,7 +372,7 @@ fn run_model(seed: u64, before: u64, after: u64, base: u64) -> Counts {
 fn randomized_runs_match_the_naive_model() {
     let mut counts = Counts::default();
     for seed in 1..=40_u64 {
-        let mut draws = Draws(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut draws = XorShift64::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let (before, after) = (draws.below(6), draws.below(6));
         counts.add(run_model(seed, before, after, 0));
         counts.add(run_model(seed + 1_000, before, after, u64::MAX - 400));

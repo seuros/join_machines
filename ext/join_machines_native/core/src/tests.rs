@@ -1,5 +1,6 @@
 extern crate std;
 use super::*;
+use matryona_machines::testing::{refuses, unchanged};
 use std::vec::Vec;
 
 const fn rec(id: u64, key: u64, timestamp: u64) -> Record {
@@ -10,7 +11,6 @@ const fn pair(key: u64, left: u64, right: u64) -> Pair {
 }
 const ACCEPTED: Result<Inserting, Refusal> = Ok(Inserting::Accepted);
 const DUPLICATE: Result<Inserting, Refusal> = Ok(Inserting::Duplicate);
-const MISMATCH: Result<Inserting, Refusal> = Err(Refusal::Mismatch);
 const LATE: Result<Inserting, Refusal> = Err(Refusal::Late);
 
 fn advance<const L: usize, const R: usize>(join: &mut Join<L, R>, side: Side, value: u64) {
@@ -79,20 +79,15 @@ fn full_output_buffer_resumes_without_losing_or_repeating_pairs() {
     assert_eq!(join.drain(&mut []), 0);
     assert!(join.pending());
 
-    let before = join.clone();
-    assert_eq!(
-        join.insert(Side::Left, rec(51, 1, 12)),
-        Err(Refusal::Pending)
-    );
-    assert_eq!(
-        join.insert(Side::Right, rec(9, 1, 12)),
-        Err(Refusal::Pending)
-    );
-    assert_eq!(
-        join.retire(&mut [Retired::default(); 4]),
-        Err(Refusal::Pending)
-    );
-    assert_eq!(join, before);
+    refuses(&mut join, Refusal::Pending, |j| {
+        j.insert(Side::Left, rec(51, 1, 12))
+    });
+    refuses(&mut join, Refusal::Pending, |j| {
+        j.insert(Side::Right, rec(9, 1, 12))
+    });
+    refuses(&mut join, Refusal::Pending, |j| {
+        j.retire(&mut [Retired::default(); 4])
+    });
 
     let mut seen = Vec::new();
     let mut buffer = [Pair::default(); 4];
@@ -127,35 +122,32 @@ fn capacity_full_mismatch_and_late_are_refusals_without_mutation() {
     assert_eq!(join.capacity(Side::Right), 1);
     assert!(join.is_empty());
     assert_eq!(join.insert(Side::Left, rec(1, 0, 5)), ACCEPTED);
-    let single = join.clone();
-    assert_eq!(
-        join.insert(Side::Left, rec(1, 3, 9)),
-        Err(Refusal::Mismatch)
-    );
-    assert_eq!(join, single);
+    refuses(&mut join, Refusal::Mismatch, |j| {
+        j.insert(Side::Left, rec(1, 3, 9))
+    });
     // Identities are per side.
     assert_eq!(join.insert(Side::Right, rec(1, 7, 50)), ACCEPTED);
     assert_eq!(join.insert(Side::Left, rec(2, 0, 6)), ACCEPTED);
     let before = join.clone();
-    assert_eq!(join.insert(Side::Left, rec(3, 0, 7)), Err(Refusal::Full));
-    assert_eq!(join.insert(Side::Right, rec(2, 0, 7)), Err(Refusal::Full));
+    refuses(&mut join, Refusal::Full, |j| {
+        j.insert(Side::Left, rec(3, 0, 7))
+    });
+    refuses(&mut join, Refusal::Full, |j| {
+        j.insert(Side::Right, rec(2, 0, 7))
+    });
     assert_eq!(
         join.advance_watermark(Side::Left, 6),
         Ok(Advancing::Advanced)
     );
     assert_eq!(join.insert(Side::Left, rec(3, 0, 6)), LATE);
     assert_eq!(join.insert(Side::Left, rec(3, 0, 0)), LATE);
-    let held = join.clone();
+    refuses(&mut join, Refusal::WatermarkRegressed, |j| {
+        j.advance_watermark(Side::Left, 5)
+    });
     assert_eq!(
-        join.advance_watermark(Side::Left, 5),
-        Err(Refusal::WatermarkRegressed)
-    );
-    assert_eq!(join, held);
-    assert_eq!(
-        join.advance_watermark(Side::Left, 6),
+        unchanged(&mut join, |j| j.advance_watermark(Side::Left, 6)),
         Ok(Advancing::Repeated)
     );
-    assert_eq!(join, held);
     assert_eq!(join.watermark(Side::Left), Some(6));
     assert_eq!(join.watermark(Side::Right), None);
     assert_eq!((join.len(Side::Left), join.len(Side::Right)), (2, 1));

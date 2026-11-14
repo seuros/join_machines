@@ -370,6 +370,8 @@ class JoinTest < Minitest::Test
     j.freeze
     assert_raises(FrozenError) { j.advance_watermark_from(:left, mark) }
     assert_raises(FrozenError) { j.advance_watermark_from(:left, Mark.new) }
+    assert_raises(FrozenError) { j.advance_watermark_from(:middle, mark) }
+    assert_raises(FrozenError) { j.advance_watermark_from(:left, Object.new) }
     assert_nil j.watermark(:left)
   end
 
@@ -381,6 +383,13 @@ class JoinTest < Minitest::Test
     assert_raises(FrozenError) { j.advance_watermark(:left, 1) }
     assert_raises(FrozenError) { j.drain(1) }
     assert_raises(FrozenError) { j.retire(1) }
+    # Frozen is checked before the arguments are read.
+    assert_raises(FrozenError) { j.insert(:middle, rec(1, 1, 1)) }
+    assert_raises(FrozenError) { j.insert(:right, Object.new) }
+    assert_raises(FrozenError) { j.advance_watermark(nil, 1) }
+    assert_raises(FrozenError) { j.advance_watermark(:left, -1) }
+    assert_raises(FrozenError) { j.drain(1.0) }
+    assert_raises(FrozenError) { j.retire(-1) }
     assert_equal 1, j.size(:left)
   end
 end

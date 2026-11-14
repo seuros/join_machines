@@ -159,6 +159,67 @@ class ValuesTest < Minitest::Test
     assert_nil j.watermark(:left)
   end
 
+  # A singleton class opened on a genuine value does not change what it is:
+  # every native read accepts it, a clone of one included.
+  def test_an_opened_singleton_class_is_still_the_gems_value
+    bounds = J::Bounds.new(1, 2).tap(&:singleton_class)
+    j = J::Join.new(bounds.clone)
+    assert_equal J::Reach.new(9, 12), bounds.reach(:left, 10)
+    assert J::Reach.new(3, 9).tap(&:singleton_class).include?(4)
+    record = J::Record.new(1, 7, 10).tap(&:singleton_class)
+    assert_equal :accepted, j.insert(:left, record)
+    assert_equal record, J::Retired.new(:left, record).record
+    mark = J::Watermark.new(9).tap(&:singleton_class)
+    assert_equal :advanced, j.advance_watermark_from(:left, mark)
+    assert_equal 9, j.watermark(:left)
+  end
+
+  # Members are read from the struct itself: a redefined reader never runs.
+  def test_a_redefined_reader_is_ignored
+    bounds = J::Bounds.new(1, 2)
+    reach = J::Reach.new(3, 9)
+    record = J::Record.new(1, 7, 10)
+    mark = J::Watermark.new(9)
+    readers = { J::Bounds => %i[before after], J::Reach => %i[first last],
+                J::Record => %i[id key timestamp], J::Watermark => %i[value] }
+    raising_readers(readers) do
+      assert_raises(IOError) { bounds.before }
+      j = J::Join.new(bounds)
+      assert_equal [9, 12], bounds.reach(:left, 10).deconstruct
+      assert reach.include?(4)
+      refute reach.include?(10)
+      assert_equal :accepted, j.insert(:left, record)
+      assert_equal :advanced, j.advance_watermark_from(:left, mark)
+      assert_equal 9, j.watermark(:left)
+    end
+  end
+
+  # Replaces each listed reader with one that raises, for the block.
+  def raising_readers(readers)
+    readers.each do |klass, names|
+      names.each do |name|
+        klass.alias_method(:"__original_#{name}", name)
+        klass.define_method(name) { raise IOError, "#{name} ran" }
+      end
+    end
+    yield
+  ensure
+    readers.each do |klass, names|
+      names.each do |name|
+        klass.alias_method(name, :"__original_#{name}")
+        klass.remove_method(:"__original_#{name}")
+      end
+    end
+  end
+
+  def test_the_extension_alone_is_a_name_error
+    lib = File.expand_path('../lib', __dir__)
+    script = 'begin; require "join_machines_native/join_machines_native"; ' \
+             'rescue NameError => e; print e.class; end'
+    output = IO.popen([RbConfig.ruby, '-I', lib, '-e', script], err: %i[child out], &:read)
+    assert_equal 'NameError', output
+  end
+
   def test_value_classes_are_resolved_at_load
     original = J.send(:remove_const, :Pair)
     J.const_set(:Pair, Data.define(:key, :left, :right))

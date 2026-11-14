@@ -13,11 +13,12 @@ fn a_replay_after_retirement_is_late_and_emits_no_pair_twice() {
     // would not be late, so it is not retired. It is held, and says so.
     advance(&mut join, Side::Right, 12);
     let mut gone = [Retired::default(); 2];
-    let kept = join.clone();
     assert_eq!(join.retirable(), 0);
-    assert_eq!(join.retire(&mut gone), Ok(0));
-    assert_eq!(join.insert(Side::Left, left), DUPLICATE);
-    assert_eq!(join, kept);
+    assert_eq!(unchanged(&mut join, |j| j.retire(&mut gone)), Ok(0));
+    assert_eq!(
+        unchanged(&mut join, |j| j.insert(Side::Left, left)),
+        DUPLICATE
+    );
     assert!(!join.pending(), "the pair was owed a second time");
     // One short of the record on its own side: still held.
     advance(&mut join, Side::Left, 9);
@@ -27,9 +28,7 @@ fn a_replay_after_retirement_is_late_and_emits_no_pair_twice() {
     assert_eq!(join.retire(&mut gone), Ok(1));
     assert_eq!((gone[0].side, gone[0].record), (Side::Left, left));
 
-    let retired = join.clone();
-    assert_eq!(join.insert(Side::Left, left), LATE);
-    assert_eq!(join, retired);
+    refuses(&mut join, Refusal::Late, |j| j.insert(Side::Left, left));
     assert!(!join.pending(), "the pair was owed a second time");
     assert_eq!(drain_all(&mut join, 1), []);
 }
@@ -81,23 +80,27 @@ fn a_retired_record_is_late_for_good_and_its_identity_is_not_remembered() {
     assert_eq!(join.retire(&mut gone), Ok(1));
     assert_eq!(gone[0].record, rec(1, 0, 5));
     // Its own watermark, which let it go, refuses it and keeps refusing it.
-    let retired = join.clone();
-    assert_eq!(join.insert(Side::Left, rec(1, 0, 5)), LATE);
+    refuses(&mut join, Refusal::Late, |j| {
+        j.insert(Side::Left, rec(1, 0, 5))
+    });
     assert_eq!(
-        join.advance_watermark(Side::Left, 5),
+        unchanged(&mut join, |j| j.advance_watermark(Side::Left, 5)),
         Ok(Advancing::Repeated)
     );
-    assert_eq!(join.insert(Side::Left, rec(1, 0, 5)), LATE);
-    assert_eq!(join, retired);
+    refuses(&mut join, Refusal::Late, |j| {
+        j.insert(Side::Left, rec(1, 0, 5))
+    });
     // The identity itself left no trace: other contents under it are judged
     // as any new record is, not as a mismatch.
-    assert_eq!(join.insert(Side::Left, rec(1, 4, 3)), LATE);
-    assert_eq!(join, retired);
+    refuses(&mut join, Refusal::Late, |j| {
+        j.insert(Side::Left, rec(1, 4, 3))
+    });
     assert_eq!(join.insert(Side::Left, rec(1, 4, 9)), ACCEPTED);
     // The record still held keeps answering as held.
-    let held = join.clone();
-    assert_eq!(join.insert(Side::Left, rec(2, 0, 6)), DUPLICATE);
-    assert_eq!(join, held);
+    assert_eq!(
+        unchanged(&mut join, |j| j.insert(Side::Left, rec(2, 0, 6))),
+        DUPLICATE
+    );
 }
 
 /// A record at `t` leaves when the opposite watermark is at or past the end
@@ -134,11 +137,9 @@ fn retirement_is_inclusive_on_both_watermarks_in_either_order() {
             assert_eq!(join.retirable(), held);
             let mut gone = [Retired::default(); 2];
             assert_eq!(join.retire(&mut gone), Ok(held));
-            let retired = join.clone();
             for record in gone.iter().take(held).map(|gone| gone.record) {
-                assert_eq!(join.insert(side, record), LATE);
+                refuses(&mut join, Refusal::Late, |j| j.insert(side, record));
             }
-            assert_eq!(join, retired);
             assert_eq!(join.insert(side, rec(4, 0, 11)), ACCEPTED);
         }
     }
@@ -170,10 +171,10 @@ fn a_saturated_reach_ends_only_at_the_domain_edge() {
         advance(&mut join, side, max);
         let mut gone = [Retired::default(); 2];
         assert_eq!(join.retire(&mut gone), Ok(2));
-        let retired = join.clone();
-        assert_eq!(join.insert(side, rec(1, 0, max - 3)), LATE);
-        assert_eq!(join.insert(side, rec(2, 0, max)), LATE);
-        assert_eq!(join, retired);
+        refuses(&mut join, Refusal::Late, |j| {
+            j.insert(side, rec(1, 0, max - 3))
+        });
+        refuses(&mut join, Refusal::Late, |j| j.insert(side, rec(2, 0, max)));
     }
 }
 
@@ -185,11 +186,14 @@ fn a_lagging_own_watermark_keeps_records_until_the_side_is_full() {
     assert_eq!(join.insert(Side::Left, rec(1, 0, 5)), ACCEPTED);
     assert_eq!(join.insert(Side::Left, rec(2, 0, 6)), ACCEPTED);
     advance(&mut join, Side::Right, u64::MAX);
-    let lagging = join.clone();
     assert_eq!(join.retirable(), 0);
-    assert_eq!(join.retire(&mut [Retired::default(); 2]), Ok(0));
-    assert_eq!(join.insert(Side::Left, rec(3, 0, 7)), Err(Refusal::Full));
-    assert_eq!(join, lagging);
+    assert_eq!(
+        unchanged(&mut join, |j| j.retire(&mut [Retired::default(); 2])),
+        Ok(0)
+    );
+    refuses(&mut join, Refusal::Full, |j| {
+        j.insert(Side::Left, rec(3, 0, 7))
+    });
     advance(&mut join, Side::Left, 5);
     assert_eq!(join.retire(&mut [Retired::default(); 2]), Ok(1));
     assert_eq!(join.insert(Side::Left, rec(3, 0, 7)), ACCEPTED);
@@ -240,11 +244,12 @@ fn retirable_means_unmatchable_and_late_on_replay_at_every_boundary() {
                     let last = u64::try_from(last).unwrap();
                     assert_eq!(partner(&join, last), (ACCEPTED, 1));
                 }
-                let held = join.clone();
                 if join.retirable() == 0 {
-                    assert_eq!(join.retire(&mut [Retired::default(); 1]), Ok(0));
-                    assert_eq!(join.insert(side, record), DUPLICATE);
-                    assert_eq!(join, held);
+                    assert_eq!(
+                        unchanged(&mut join, |j| j.retire(&mut [Retired::default(); 1])),
+                        Ok(0)
+                    );
+                    assert_eq!(unchanged(&mut join, |j| j.insert(side, record)), DUPLICATE);
                     kept += 1;
                     continue;
                 }
@@ -253,9 +258,7 @@ fn retirable_means_unmatchable_and_late_on_replay_at_every_boundary() {
                     assert!(answer == LATE || (answer, owed) == (ACCEPTED, 0));
                 }
                 assert_eq!(join.retire(&mut [Retired::default(); 1]), Ok(1));
-                let gone = join.clone();
-                assert_eq!(join.insert(side, record), LATE);
-                assert_eq!(join, gone);
+                refuses(&mut join, Refusal::Late, |j| j.insert(side, record));
                 retired += 1;
             }
         }

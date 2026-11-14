@@ -60,21 +60,16 @@ fn regression_through_a_caller_watermark_is_refused_without_mutation() {
         join.advance_watermark(Side::Right, 12),
         Ok(Advancing::Advanced)
     );
-    let before = join.clone();
 
     let behind = Watermark::at(11);
-    assert_eq!(
-        join.advance_watermark_from(Side::Right, &behind),
-        Err(Refusal::WatermarkRegressed)
-    );
-    assert_eq!(join, before);
+    refuses(&mut join, Refusal::WatermarkRegressed, |j| {
+        j.advance_watermark_from(Side::Right, &behind)
+    });
     // An uninitialized source is behind an initialized side: refused too.
     let unset = Watermark::default();
-    assert_eq!(
-        join.advance_watermark_from(Side::Right, &unset),
-        Err(Refusal::WatermarkRegressed)
-    );
-    assert_eq!(join, before);
+    refuses(&mut join, Refusal::WatermarkRegressed, |j| {
+        j.advance_watermark_from(Side::Right, &unset)
+    });
     assert_eq!(join.watermark(Side::Right), Some(12));
     // The source is only read.
     assert_eq!(behind.value(), Some(11));
@@ -88,12 +83,10 @@ fn regression_through_a_caller_watermark_is_refused_without_mutation() {
         join.advance_watermark_from(Side::Left, &behind),
         Ok(Advancing::Advanced)
     );
-    let held = join.clone();
     assert_eq!(
-        join.advance_watermark_from(Side::Left, &behind),
+        unchanged(&mut join, |j| j.advance_watermark_from(Side::Left, &behind)),
         Ok(Advancing::Repeated)
     );
-    assert_eq!(join, held);
     assert_eq!(join.watermark(Side::Left), Some(11));
 }
 
