@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/join_machines/compare/join_machines/v0.5.1...join_machines/v0.6.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* read sibling watermarks through matryona own_or_sibling, one refusal message
+
+### Features
+
+* read sibling watermarks through matryona own_or_sibling, one refusal message ([6634897](https://github.com/seuros/join_machines/commit/6634897f7e7684feb52c3cf0ddb7c805467f4991))
+
 ## [0.5.1](https://github.com/seuros/join_machines/compare/join_machines/v0.5.0...join_machines/v0.5.1) (2026-11-14)
 
 
