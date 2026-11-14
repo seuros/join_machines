@@ -269,7 +269,8 @@ class ValuesTest < Minitest::Test
     assert_raises(TypeError) { reach.include?(4) }
     # A subclass of the gem's own Watermark is not duck-typed as a sibling's.
     mark = forged(:ForgedWatermark, 'JoinMachines::Watermark').new(value: 4)
-    assert_raises(TypeError) { j.advance_watermark_from(:left, mark) }
+    error = assert_raises(TypeError) { j.advance_watermark_from(:left, mark) }
+    assert_equal 'watermark must be a JoinMachines::Watermark or respond to #value', error.message
     assert_equal [0, nil], [j.size(:left), j.watermark(:left)]
   end
 

@@ -353,8 +353,12 @@ class JoinTest < Minitest::Test
     j = join
     mark = Mark.new
     [1, nil, '1', Object.new].each do |bad|
-      assert_raises(TypeError) { j.advance_watermark_from(:left, bad) }
+      error = assert_raises(TypeError) { j.advance_watermark_from(:left, bad) }
+      assert_equal 'watermark must be a JoinMachines::Watermark or respond to #value', error.message
     end
+    # A private reader is not a public one: it is never called.
+    hidden = Class.new { private def value = raise('called') }.new
+    assert_raises(TypeError) { j.advance_watermark_from(:left, hidden) }
     [1.0, '1', Object.new].each do |bad|
       assert_raises(TypeError) { j.advance_watermark_from(:left, Data.define(:value).new(bad)) }
     end

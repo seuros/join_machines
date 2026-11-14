@@ -9,7 +9,7 @@ use join_machines::{
     Advancing, Bounds, Inserting, Join, Pair, Reach, Record, Refusal, Retired, Side, Watermark,
 };
 use magnus::{Error, RArray, Ruby, Symbol, Value, typed_data::Obj, value::ReprValue};
-use matryona_machines::ruby::{Class, Symbols, integer, keep, optional, symbol};
+use matryona_machines::ruby::{Class, Symbols, integer, keep, optional, own_or_sibling, symbol};
 
 /// Live records held per input.
 const CAPACITY: usize = 64;
@@ -284,25 +284,15 @@ impl Wrapper {
     /// `watermark`'s value: this gem's `Watermark` exactly (read natively),
     /// `TypeError` for a subclass of it, else a sibling's read by `#value`.
     fn watermark_value(ruby: &Ruby, watermark: Value) -> Result<Option<u64>, Error> {
-        let own = classes(ruby)?.watermark;
-        if let Ok([value]) =
-            members::<1>(ruby, watermark, own, "expected a JoinMachines::Watermark")
-        {
-            return optional(value, "value");
-        }
-        if classes::subclassed(ruby, watermark, own) {
-            return Err(Error::new(
-                ruby.exception_type_error(),
-                "JoinMachines::Watermark is sealed: a subclass of it is not a Watermark",
-            ));
-        }
-        if !watermark.respond_to("value", false)? {
-            return Err(Error::new(
-                ruby.exception_type_error(),
-                "watermark must respond to #value",
-            ));
-        }
-        optional(watermark.funcall("value", ())?, "value")
+        let own = classes(ruby)?.watermark.get(ruby);
+        let [value] = own_or_sibling(
+            ruby,
+            watermark,
+            own,
+            ["value"],
+            "watermark must be a JoinMachines::Watermark or respond to #value",
+        )?;
+        optional(value, "value")
     }
 
     fn watermark(&self, input: Value) -> Result<Option<u64>, Error> {

@@ -6,8 +6,8 @@
 //! value it reads must be an instance of exactly the sealed class, its members
 //! are read natively (no method is dispatched) and the caller re-validates
 //! them through the core.
-use magnus::{Error, RModule, RStruct, Ruby, Value, prelude::*};
-use matryona_machines::ruby::{Class, Registry, exact_fields, instance_of};
+use magnus::{Error, RModule, Ruby, Value, prelude::*};
+use matryona_machines::ruby::{Class, Registry, exact_fields};
 
 /// `JoinMachines::Reach`, `Bounds`, `Pair`, `Record`, `Retired`, `Watermark`.
 pub struct Classes {
@@ -55,12 +55,4 @@ pub fn members<const N: usize>(
     message: &'static str,
 ) -> Result<[Value; N], Error> {
     exact_fields::<N>(ruby, value, class.get(ruby), message)
-}
-
-/// Whether `value` is an instance of a subclass of `class` (never `class`
-/// itself): a value that claims to be one of the gem's and is not.
-pub fn subclassed(ruby: &Ruby, value: Value, class: Class) -> bool {
-    let class = class.get(ruby);
-    value.is_kind_of(class)
-        && !RStruct::from_value(value).is_some_and(|data| instance_of(data, class))
 }
