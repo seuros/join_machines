@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/seuros/join_machines/compare/join_machines/v0.5.0...join_machines/v0.5.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3 with symbols! tables for refusals, advancing, inserting ([a287139](https://github.com/seuros/join_machines/commit/a287139080c0b42d4ea0435f9cecaf5213924b85))
+
 ## [0.5.0](https://github.com/seuros/join_machines/compare/join_machines/v0.4.0...join_machines/v0.5.0) (2026-11-14)
 
 
