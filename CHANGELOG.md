@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/seuros/join_machines/compare/join_machines/v0.6.1...join_machines/v0.6.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([7df0f34](https://github.com/seuros/join_machines/commit/7df0f34bb6f9ee574054bef9b858c6c51db27152))
+
 ## [0.6.1](https://github.com/seuros/join_machines/compare/join_machines/v0.6.0...join_machines/v0.6.1) (2026-11-16)
 
 
