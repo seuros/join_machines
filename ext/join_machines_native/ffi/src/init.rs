@@ -18,12 +18,13 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let reach = known.reach.get(ruby);
     reach.define_method("include?", method!(reach_contains, 1))?;
     // The Data classes are defined in Ruby; the core validates them here. Each
-    // hook answers the core value (discarded) or raises.
-    module.define_singleton_method("__reach", function!(validate_reach, 2))?;
-    module.define_singleton_method("__bounds", function!(validate_bounds, 2))?;
-    module.define_singleton_method("__pair", function!(validate_pair, 3))?;
-    module.define_singleton_method("__record", function!(validate_record, 3))?;
-    module.define_singleton_method("__retired", function!(validate_retired, 2))?;
+    // hook takes the value just built, reads it natively, and answers nil or
+    // raises.
+    module.define_singleton_method("__reach", function!(validate_reach, 1))?;
+    module.define_singleton_method("__bounds", function!(validate_bounds, 1))?;
+    module.define_singleton_method("__pair", function!(validate_pair, 1))?;
+    module.define_singleton_method("__record", function!(validate_record, 1))?;
+    module.define_singleton_method("__retired", function!(validate_retired, 1))?;
     module.define_singleton_method("__watermark", function!(validate_watermark, 1))?;
     let class = module.define_class("Join", ruby.class_object())?;
     class.undef_default_alloc_func();

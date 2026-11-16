@@ -6,9 +6,10 @@ Gem::Specification.new do |spec|
   spec.version = JoinMachines::VERSION
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
-  spec.summary = 'Initial native bounded two-input interval-join metadata policy'
-  spec.description = 'Local unstable interval-join bookkeeping over record IDs, ' \
-                     'not a stream processor or payload store.'
+  spec.summary = 'Bounded two-input interval-join bookkeeping for Ruby'
+  spec.description = 'Matches left and right record IDs that share a key within a time window, emits the pairs in ' \
+                     'resumable batches and retires records past the watermark. Metadata only: not a ' \
+                     'stream processor or payload store.'
   spec.homepage = 'https://github.com/seuros/join_machines'
   spec.license = 'MIT'
   spec.required_ruby_version = '>= 4.0.0'

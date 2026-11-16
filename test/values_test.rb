@@ -194,11 +194,41 @@ class ValuesTest < Minitest::Test
     end
   end
 
+  # Construction validates the members it stored, read from the struct:
+  # neither a redefined `deconstruct` nor a redefined reader is asked, so
+  # neither can pass a bad value off as good or a good one as bad. `with`
+  # runs the same check.
+  def test_construction_reads_its_own_members_natively
+    classes = [J::Reach, J::Bounds, J::Pair, J::Record, J::Retired, J::Watermark]
+    # Data owns `deconstruct`, so each class shadows it and removes the shadow.
+    classes.each { |klass| klass.define_method(:deconstruct) { raise IOError, 'deconstruct ran' } }
+    readers = { J::Reach => %i[first last], J::Bounds => %i[before after], J::Pair => %i[key left right],
+                J::Record => %i[id key timestamp], J::Retired => %i[side record], J::Watermark => %i[value] }
+    raising_readers(readers) do
+      J::Reach.new(3, 5)
+      J::Bounds.new(MAX, 0)
+      J::Pair.new(1, 2, 3)
+      record = J::Record.new(1, 2, 3)
+      J::Retired.new(:left, record)
+      J::Watermark.new(nil)
+      error = assert_raises(RangeError) { J::Reach.new(6, 5) }
+      assert_equal "a reach's first must not be above its last", error.message
+      assert_raises(RangeError) { J::Reach.new(3, 5).with(first: 6) }
+      assert_raises(RangeError) { J::Record.new(1, 2, 3).with(timestamp: -1) }
+      assert_raises(TypeError) { J::Retired.new(:left, [1, 2, 3]) }
+      assert_raises(RangeError) { J::Retired.new(:up, record) }
+      assert_raises(TypeError) { J::Watermark.new(1.5) }
+    end
+  ensure
+    classes.each { |klass| klass.remove_method(:deconstruct) }
+  end
+
   # Replaces each listed reader with one that raises, for the block.
   def raising_readers(readers)
     readers.each do |klass, names|
       names.each do |name|
         klass.alias_method(:"__original_#{name}", name)
+        klass.remove_method(name)
         klass.define_method(name) { raise IOError, "#{name} ran" }
       end
     end
@@ -206,6 +236,7 @@ class ValuesTest < Minitest::Test
   ensure
     readers.each do |klass, names|
       names.each do |name|
+        klass.remove_method(name)
         klass.alias_method(name, :"__original_#{name}")
         klass.remove_method(:"__original_#{name}")
       end
@@ -270,7 +301,7 @@ class ValuesTest < Minitest::Test
     # A subclass of the gem's own Watermark is not duck-typed as a sibling's.
     mark = forged(:ForgedWatermark, 'JoinMachines::Watermark').new(value: 4)
     error = assert_raises(TypeError) { j.advance_watermark_from(:left, mark) }
-    assert_equal 'watermark must be a JoinMachines::Watermark or respond to #value', error.message
+    assert_equal 'JoinMachines::Watermark is sealed: a subclass of it is not a Watermark', error.message
     assert_equal [0, nil], [j.size(:left), j.watermark(:left)]
   end
 

@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 #![doc = include_str!("../README.md")]
 /// Per-input event-time progress, the sibling type this join is built on, and
 /// what an honoured advance of it did: `Advanced`, or `Repeated` for an
@@ -293,12 +294,12 @@ impl<const L: usize, const R: usize> Join<L, R> {
         if self.passed(side, record.timestamp) {
             return Err(Refusal::Late);
         }
-        let slot = self
-            .slots(side)
-            .iter()
-            .position(Option::is_none)
+        let free = self
+            .slots_mut(side)
+            .iter_mut()
+            .find(|slot| slot.is_none())
             .ok_or(Refusal::Full)?;
-        self.slots_mut(side)[slot] = Some(record);
+        *free = Some(record);
         self.probe = self.settle(side, record, 0);
         Ok(Inserting::Accepted)
     }
@@ -315,6 +316,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
         let mut count = 0;
         let mut probe = self.probe;
         while let Some(current) = probe {
+            // Each probe's cursor is past the last: at most one per slot.
             count += 1;
             probe = self.next(current);
         }
@@ -344,6 +346,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
                     right: probe.record.id,
                 },
             };
+            // At most `out.len()`.
             written += 1;
             self.probe = self.next(probe);
         }
@@ -448,8 +451,13 @@ impl<const L: usize, const R: usize> Join<L, R> {
                 if !self.finished(side, record.timestamp) {
                     continue;
                 }
-                self.slots_mut(side)[index] = None;
+                let Some(record) = self.slots_mut(side).get_mut(index).and_then(Option::take)
+                else {
+                    debug_assert!(false, "the record just read at this slot is still there");
+                    continue;
+                };
                 *slot = Retired { side, record };
+                // At most `out.len()`.
                 written += 1;
             }
         }
@@ -533,6 +541,7 @@ impl<const L: usize, const R: usize> Join<L, R> {
 
     /// The pair owed after `probe`.
     fn next(&self, probe: Probe) -> Option<Probe> {
+        // `cursor` is a slot position, far below `usize::MAX`.
         self.settle(probe.side, probe.record, probe.cursor + 1)
     }
 }

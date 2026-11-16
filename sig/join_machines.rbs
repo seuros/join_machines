@@ -128,4 +128,13 @@ module JoinMachines
     # retired.
     def retire: (Integer max) -> (Array[Retired] | :pending)
   end
+
+  # Private native hooks each Data value's `initialize` runs on the built
+  # value: nil, or TypeError/RangeError for one the core rejects.
+  private def self.__reach: (Reach value) -> nil
+  private def self.__bounds: (Bounds value) -> nil
+  private def self.__pair: (Pair value) -> nil
+  private def self.__record: (Record value) -> nil
+  private def self.__retired: (Retired value) -> nil
+  private def self.__watermark: (Watermark value) -> nil
 end

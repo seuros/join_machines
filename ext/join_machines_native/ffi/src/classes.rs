@@ -7,7 +7,7 @@
 //! are read natively (no method is dispatched) and the caller re-validates
 //! them through the core.
 use magnus::{Error, RModule, Ruby, Value, prelude::*};
-use matryona_machines::ruby::{Class, Registry, exact_fields};
+use matryona_machines::ruby::{Class, exact_fields};
 
 /// `JoinMachines::Reach`, `Bounds`, `Pair`, `Record`, `Retired`, `Watermark`.
 pub struct Classes {
@@ -19,7 +19,11 @@ pub struct Classes {
     pub watermark: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("join_machines");
+matryona_machines::registry! {
+    static CLASSES: Classes = "join_machines";
+    /// The classes resolved at init.
+    pub fn classes;
+}
 
 /// Resolve and pin the classes Ruby defined before loading the extension.
 pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
@@ -33,11 +37,6 @@ pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         watermark: class("Watermark")?,
     };
     CLASSES.set(ruby, classes).map(drop)
-}
-
-/// The classes resolved at init.
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
 }
 
 /// A new value of `class`, through its own `new` (so through its check).

@@ -4,7 +4,7 @@
 
 An interval-join ledger for Ruby. You tell it about every record on two inputs: an id, a key, an event time. It tells you which left and right records share a key and landed close enough in time, hands you those pairs in batches as small as you like, and tells you which records can never match anything again so you can throw their payloads away. It never sees a payload. It keeps the bookkeeping, you keep the data.
 
-This is an initial, unstable API. It is a policy core, not a stream processor.
+Pre-1.0: breaking changes land in minor versions. It is a policy core, not a stream processor.
 
 ## Quick Start
 

@@ -84,7 +84,7 @@ where this core does. `side_watermark` answers a `Data` with the one reader
 
 This is join bookkeeping only: no payload buffering, transport, execution,
 persistence, key hashing or clocks. Key collisions, watermark generation and
-recovery belong to the caller. Initial, unstable API.
+recovery belong to the caller. Pre-1.0: breaking changes land in minor versions.
 
 ```rust
 use join_machines::{

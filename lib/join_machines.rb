@@ -5,13 +5,15 @@ require_relative 'join_machines/version'
 module JoinMachines
   # Every value below is checked by the core when it is built, by hand or by
   # the gem, `with` included: TypeError for a wrong type, RangeError for a
-  # value the core rejects. `hook` names the private native check.
+  # value the core rejects. `hook` names the private native check, handed the
+  # value itself once stored: it reads the members from the struct, never
+  # through `deconstruct` or a reader, so neither can lie to it.
   module Checked
     def self.by(hook)
       Module.new do
         define_method(:initialize) do |**fields|
           super(**fields)
-          JoinMachines.__send__(hook, *deconstruct)
+          JoinMachines.__send__(hook, self)
         end
       end
     end

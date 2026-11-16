@@ -9,7 +9,9 @@ use join_machines::{
     Advancing, Bounds, Inserting, Join, Pair, Reach, Record, Refusal, Retired, Side, Watermark,
 };
 use magnus::{Error, RArray, Ruby, Symbol, Value, typed_data::Obj, value::ReprValue};
-use matryona_machines::ruby::{Class, Symbols, integer, keep, optional, own_or_sibling, symbol};
+use matryona_machines::ruby::{
+    Class, Refused, Symbols, integer, keep, optional, own_or_sibling_why, symbol,
+};
 
 /// Live records held per input.
 const CAPACITY: usize = 64;
@@ -85,40 +87,68 @@ fn checked_reach(ruby: &Ruby, first: u64, last: u64) -> Result<Reach, Error> {
     })
 }
 
-/// Private hook behind `Reach.new`.
-fn validate_reach(ruby: &Ruby, first: Value, last: Value) -> Result<(), Error> {
+// Private hooks behind every value's `initialize`, called with the value
+// itself once `Data#initialize` stored it: its members are read from the
+// struct, never through `deconstruct` or a reader, and only from an instance
+// of exactly its class.
+
+/// The `N` members of the value being built, `this`, read natively.
+fn own<const N: usize>(
+    ruby: &Ruby,
+    this: Value,
+    class: impl FnOnce(&classes::Classes) -> Class,
+    message: &'static str,
+) -> Result<[Value; N], Error> {
+    members::<N>(ruby, this, class(classes(ruby)?), message)
+}
+
+/// `Reach.new`: the core's `Reach::new`.
+fn validate_reach(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Reach";
+    let [first, last] = own(ruby, this, |known| known.reach, message)?;
     let (first, last) = (integer(first, "first")?, integer(last, "last")?);
     checked_reach(ruby, first, last).map(|_| ())
 }
 
-/// Private hooks behind `Bounds.new`, `Pair.new`, `Record.new`, `Retired.new`
-/// and `Watermark.new`. The core's `Bounds::new` and its public-field `Pair`,
-/// `Record` and `Retired` accept every value of their field types, so
-/// converting each argument to that type (an Integer in `0..2**64`, a side, a
-/// `JoinMachines::Record`, `nil` or an Integer) is the whole check.
-fn validate_bounds(before: Value, after: Value) -> Result<(), Error> {
+// `Bounds.new`, `Pair.new`, `Record.new`, `Retired.new` and `Watermark.new`.
+// The core's `Bounds::new` and its public-field `Pair`, `Record` and
+// `Retired` accept every value of their field types, so converting each
+// member to that type (an Integer in `0..2**64`, a side, a
+// `JoinMachines::Record`, `nil` or an Integer) is the whole check.
+
+fn validate_bounds(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Bounds";
+    let [before, after] = own(ruby, this, |known| known.bounds, message)?;
     integer::<u64>(before, "before")?;
     integer::<u64>(after, "after").map(drop)
 }
 
-fn validate_pair(key: Value, left: Value, right: Value) -> Result<(), Error> {
+fn validate_pair(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Pair";
+    let [key, left, right] = own(ruby, this, |known| known.pair, message)?;
     integer::<u64>(key, "key")?;
     integer::<u64>(left, "left")?;
     integer::<u64>(right, "right").map(drop)
 }
 
-fn validate_record(id: Value, key: Value, timestamp: Value) -> Result<(), Error> {
+fn validate_record(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Record";
+    let [id, key, timestamp] = own(ruby, this, |known| known.record, message)?;
     integer::<u64>(id, "id")?;
     integer::<u64>(key, "key")?;
     integer::<u64>(timestamp, "timestamp").map(drop)
 }
 
-fn validate_retired(input: Value, record: Value) -> Result<(), Error> {
+fn validate_retired(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Retired";
+    let [input, record] = own(ruby, this, |known| known.retired, message)?;
     side(input)?;
     entry(record).map(drop)
 }
 
-fn validate_watermark(value: Value) -> Result<(), Error> {
+fn validate_watermark(ruby: &Ruby, this: Value) -> Result<(), Error> {
+    let message = "expected a JoinMachines::Watermark";
+    let [value] = own(ruby, this, |known| known.watermark, message)?;
     optional::<u64>(value, "value").map(drop)
 }
 
@@ -285,13 +315,12 @@ impl Wrapper {
     /// `TypeError` for a subclass of it, else a sibling's read by `#value`.
     fn watermark_value(ruby: &Ruby, watermark: Value) -> Result<Option<u64>, Error> {
         let own = classes(ruby)?.watermark.get(ruby);
-        let [value] = own_or_sibling(
-            ruby,
-            watermark,
-            own,
-            ["value"],
-            "watermark must be a JoinMachines::Watermark or respond to #value",
-        )?;
+        let [value] = own_or_sibling_why(ruby, watermark, own, ["value"], |why| match why {
+            Refused::Subclass => {
+                "JoinMachines::Watermark is sealed: a subclass of it is not a Watermark"
+            }
+            _ => "watermark must be a JoinMachines::Watermark or respond to #value",
+        })?;
         optional(value, "value")
     }
 
