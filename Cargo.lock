@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "join-machines"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "matryona-machines",
  "window-machines",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "join_machines_native"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "join-machines",
  "magnus",

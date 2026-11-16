@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/join_machines/compare/join-machines-v0.7.0...join-machines-v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* validate values from their stored members, not deconstruct ([7af4e49](https://github.com/seuros/join_machines/commit/7af4e498acb6f9e48b3b323bf0fb0ccc57331ab3))
+
 ## [0.7.0](https://github.com/seuros/join_machines/compare/join-machines-v0.6.0...join-machines-v0.7.0) (2026-11-14)
 
 
