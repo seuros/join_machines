@@ -4,6 +4,7 @@ use crate::{
     validate_reach, validate_record, validate_retired, validate_watermark,
 };
 use magnus::{Error, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::Class;
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
@@ -47,5 +48,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     class.define_method("retirable", method!(Wrapper::retirable, 0))?;
     class.define_method("retire", method!(Wrapper::retire, 1))?;
-    Ok(())
+    // `new` answers a Join: its class is fixed now, so building one never
+    // runs `Object.const_get`.
+    Class::pin_wrapped::<Wrapper>(ruby, class).map(drop)
 }
